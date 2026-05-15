@@ -600,7 +600,7 @@ def main():
                         )
                     text_str += "====" * 10 + "\n"
 
-                text_table.add_data(total_train_steps, text_str)
+                # text_table.add_data(total_train_steps, text_str)
 
             total_train_steps += 1
             batch = {

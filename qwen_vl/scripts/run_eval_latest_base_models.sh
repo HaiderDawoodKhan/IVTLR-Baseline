@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+M3COT_DIR="$ROOT/output/qwen_IVTLR_m3cot_base"
+SQA_DIR="$ROOT/output/qwen_IVTLR_sqa_base"
+
+find_latest_checkpoint() {
+  local dir="$1"
+  local pattern="$2"
+  local latest
+
+  latest=$(find "$dir" -maxdepth 1 -type f -name "$pattern" | sort -V | tail -n 1)
+  if [[ -z "$latest" ]]; then
+    return 1
+  fi
+  echo "$latest"
+}
+
+m3cot_ckpt=$(find_latest_checkpoint "$M3COT_DIR" "epoch_*_full_model_fp32.pth") || {
+  echo "No M3CoT baseline checkpoint found in $M3COT_DIR" >&2
+  exit 1
+}
+
+sqa_ckpt=$(find_latest_checkpoint "$SQA_DIR" "epoch_*_full_model_fp32.pth") || {
+  echo "No SQA baseline checkpoint found in $SQA_DIR" >&2
+  exit 1
+}
+
+echo "Using M3CoT baseline checkpoint: $m3cot_ckpt"
+python "$ROOT/infer_m3cot_base.py" --checkpoint "$m3cot_ckpt"
+
+echo "Using SQA baseline checkpoint: $sqa_ckpt"
+python "$ROOT/infer_sqa_base.py" --config "$ROOT/args/qwen_sqa.yaml" --checkpoint "$sqa_ckpt"

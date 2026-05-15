@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 M3COT_DIR="$ROOT/output/qwen_IVTLR_m3cot"
 SQA_DIR="$ROOT/output/qwen_IVTLR_sqa"
 
@@ -28,7 +29,7 @@ sqa_ckpt=$(find_latest_checkpoint "$SQA_DIR" "epoch_*_full_model_fp32.pth") || {
 }
 
 echo "Using M3CoT checkpoint: $m3cot_ckpt"
-python "$ROOT/infer.py" --checkpoint "$m3cot_ckpt"
+python "$ROOT/infer_m3cot.py" --checkpoint "$m3cot_ckpt"
 
 echo "Using SQA checkpoint: $sqa_ckpt"
-python "$ROOT/infer_sqa.py" --config args/qwen_sqa.yaml --checkpoint "$sqa_ckpt"
+python "$ROOT/infer_sqa.py" --config "$ROOT/args/qwen_sqa.yaml" --checkpoint "$sqa_ckpt"
