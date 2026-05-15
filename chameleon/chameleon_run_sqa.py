@@ -27,12 +27,6 @@ from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import ChameleonProcessor, ChameleonForConditionalGeneration
 from datasets import load_dataset
 import logging
-logging.basicConfig(
-    filename='chameleon_sqa_train.log',  
-    level=logging.DEBUG,          
-    format='[%(asctime)s] %(message)s',  
-    datefmt='%Y-%m-%d %H:%M:%S'   
-)
 
 from chameleon_ivtlr import IVTLR
 from chameleon_dataset import (
@@ -93,6 +87,14 @@ def main():
         os.makedirs(save_dir)
 
     torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
+
+    logging.getLogger().handlers.clear()
+    logging.basicConfig(
+        filename=os.path.join(save_dir, "chameleon_scienceqa_train.log"),
+        level=logging.DEBUG,
+        format='[%(asctime)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     
     cur_ckpts = os.listdir(save_dir)
     

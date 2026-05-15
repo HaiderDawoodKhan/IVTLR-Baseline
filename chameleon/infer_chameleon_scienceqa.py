@@ -14,8 +14,10 @@ import os
 import time
 from datetime import timedelta
 
+os.makedirs("sqa_output", exist_ok=True)
+logging.getLogger().handlers.clear()
 logging.basicConfig(
-    filename='chameleon_sqa_infer_64_full.log',
+    filename=os.path.join("sqa_output", "chameleon_scienceqa_infer.log"),
     level=logging.DEBUG,
     format='[%(asctime)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'

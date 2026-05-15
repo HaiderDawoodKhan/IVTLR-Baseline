@@ -12,20 +12,17 @@ import json
 import os
 import time
 from datetime import timedelta
-logging.basicConfig(
-    filename='qwenvl_32_infer_time.log',
-    level=logging.DEBUG,
-    format='[%(asctime)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+import argparse
+import yaml
 import pdb
+import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_inference_model(checkpoint_path):
-    processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+def load_inference_model(checkpoint_path, model_name):
+    processor = AutoProcessor.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen2-VL-7B-Instruct",
+        model_name,
         use_fast=False,
         trust_remote_code=True,
         padding_side="right"
@@ -40,7 +37,7 @@ def load_inference_model(checkpoint_path):
     })
     
     base_model = Qwen2VLForConditionalGeneration.from_pretrained(
-        "Qwen/Qwen2-VL-7B-Instruct",
+        model_name,
         device_map="cuda",
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -91,9 +88,58 @@ def load_inference_model(checkpoint_path):
     model.eval()
     return model, processor, tokenizer
 
-model, processor, tokenizer = load_inference_model("your_path")
+parser = argparse.ArgumentParser(description="IVTLR inference on M3CoT")
+parser.add_argument("--checkpoint", required=True, help="Path to .pth checkpoint")
+parser.add_argument("--config", default="args/qwen_m3cot.yaml", help="Path to config YAML")
+parser.add_argument("--model_name", default=None, help="Override model name (e.g., Qwen/Qwen2-VL-2B-Instruct)")
+parser.add_argument("--run_tag", default=None, help="Optional tag for per-run output subfolder (e.g., epoch_4)")
+args = parser.parse_args()
 
 os.makedirs("output", exist_ok=True)
+base_output_dir = "output/inference/m3cot"
+output_dir = os.path.join(base_output_dir, args.run_tag) if args.run_tag else base_output_dir
+os.makedirs(output_dir, exist_ok=True)
+stdout_stderr_path = os.path.join(output_dir, "qwen_m3cot_infer_stdout_stderr.log")
+_stdout_file = open(stdout_stderr_path, "a", encoding="utf-8")
+_stdout_orig = sys.stdout
+_stderr_orig = sys.stderr
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+sys.stdout = _Tee(_stdout_orig, _stdout_file)
+sys.stderr = _Tee(_stderr_orig, _stdout_file)
+
+logging.getLogger().handlers.clear()
+logging.basicConfig(
+    filename=os.path.join(output_dir, "qwen_m3cot_infer.log"),
+    level=logging.DEBUG,
+    format='[%(asctime)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+model_name = args.model_name
+if args.config and os.path.exists(args.config):
+    with open(args.config, "r", encoding="utf-8") as f:
+        config_dict = yaml.safe_load(f) or {}
+    model_name = config_dict.get("model_name", model_name)
+
+if not model_name:
+    raise ValueError("model_name must be provided via --model_name or config YAML")
+
+model, processor, tokenizer = load_inference_model(args.checkpoint, model_name)
 
 def format_prompt(example):
     question = example["question"].strip()
@@ -134,7 +180,7 @@ def evaluate_and_save(eval_dataset, model, processor):
     total_generated_tokens = 0 
     total_generate_time = 0.0  
     
-    output_path = "output/qwen2vl_32.jsonl"
+    output_path = os.path.join(output_dir, "qwen_m3cot_predictions.jsonl")
     with open(output_path, "a", encoding="utf-8") as f_out:
         for ex in eval_dataset:
             input_text = ex["question_raw"]
@@ -216,7 +262,13 @@ def evaluate_and_save(eval_dataset, model, processor):
                 ]
             }
             f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
-            f_out.flush()
+
+        accuracy = correct / total if total > 0 else 0
+        logging.info(f"[FINAL] Total: {total}, Correct: {correct}, Accuracy: {accuracy:.2%}")
+        print(f"[FINAL] Total: {total}, Correct: {correct}, Accuracy: {accuracy:.2%}")
+        print(f"Results saved to: {output_path}")
+    
+        f_out.flush()
             
         avg_generated_tokens = total_generated_tokens / total if total > 0 else 0
         avg_time_per_sample = total_generate_time / total if total > 0 else 0

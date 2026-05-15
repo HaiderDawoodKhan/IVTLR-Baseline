@@ -52,7 +52,7 @@ class IVTLR(nn.Module):
             self.embedding = self.base_causallm.get_input_embeddings()
         
         # self.processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
-        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+        # self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
     def forward(
         self,
         input_ids: torch.LongTensor,        # shape = (B, S)
@@ -67,9 +67,9 @@ class IVTLR(nn.Module):
         B, S = input_ids.size()
 
         # decode
-        _ = self.processor.tokenizer.batch_decode(
-            input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True
-        )
+        # _ = self.processor.tokenizer.batch_decode(
+        #     input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True
+        # )
 
         inputs_embeds = self.embedding(input_ids)  # (B, S, D)
 

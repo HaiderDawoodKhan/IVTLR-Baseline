@@ -1,6 +1,7 @@
 project: ivtlr
-save_path: /path/IVT-LR/qwen_vl/
-name: qwen_IVTLR
+save_path: "/home/csalt/Haider/DVLM/IVT-LR/qwen_vl/output"
+name: qwen_IVTLR_sqa
+model_name: Qwen/Qwen2-VL-2B-Instruct
 
 epochs_per_stage: 4
 max_latent_stage: 5

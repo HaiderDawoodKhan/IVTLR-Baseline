@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+qwen_vl/wandb
+qwen_vl/output
+*.log
