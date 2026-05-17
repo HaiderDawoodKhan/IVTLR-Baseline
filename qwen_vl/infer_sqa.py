@@ -19,7 +19,7 @@ import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_inference_model(checkpoint_path, model_name):
+def load_inference_model(checkpoint_path, model_name, disable_visual_insert=False):
     processor = AutoProcessor.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
@@ -72,7 +72,8 @@ def load_inference_model(checkpoint_path, model_name):
         eos_token_id=tokenizer.eos_token_id,
         image_token_id=image_token_id,
         visual_start_id=visual_start_id, 
-        visual_end_id=visual_end_id
+        visual_end_id=visual_end_id,
+        disable_visual_insert=disable_visual_insert
     )
     
     state_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -93,10 +94,22 @@ parser.add_argument("--checkpoint", required=True, help="Path to .pth checkpoint
 parser.add_argument("--config", default="args/qwen_sqa.yaml", help="Path to config YAML")
 parser.add_argument("--model_name", default=None, help="Override model name (e.g., Qwen/Qwen2-VL-2B-Instruct)")
 parser.add_argument("--run_tag", default=None, help="Optional tag for per-run output subfolder (e.g., epoch_4)")
+parser.add_argument(
+    "--disable_visual_insert",
+    action="store_true",
+    help="Disable top-k visual token insertion during latent reasoning",
+)
+parser.add_argument(
+    "--disabled_model",
+    action="store_true",
+    help="If model was trained using disabled visual insert, make dir accordingly"
+)
 args = parser.parse_args()
 
 os.makedirs("output", exist_ok=True)
 base_output_dir = "output/inference/sqa"
+if args.disabled_model:
+    base_output_dir += "_no_vis"
 output_dir = os.path.join(base_output_dir, args.run_tag) if args.run_tag else base_output_dir
 os.makedirs(output_dir, exist_ok=True)
 stdout_stderr_path = os.path.join(output_dir, "qwen_scienceqa_infer_stdout_stderr.log")
@@ -139,7 +152,11 @@ if args.config and os.path.exists(args.config):
 if not model_name:
     raise ValueError("model_name must be provided via --model_name or config YAML")
 
-model, processor, tokenizer = load_inference_model(args.checkpoint, model_name)
+model, processor, tokenizer = load_inference_model(
+    args.checkpoint,
+    model_name,
+    disable_visual_insert=args.disable_visual_insert,
+)
 
 def format_prompt(example):
     question = example["question"].strip()

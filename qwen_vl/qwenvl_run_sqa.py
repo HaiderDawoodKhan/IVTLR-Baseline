@@ -222,6 +222,11 @@ def main():
     parser.add_argument("--deepspeed", action="store_true", help="Enable DeepSpeed")
     parser.add_argument("--deepspeed_config", default="ds_config.json", help="DeepSpeed config path")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank passed by DeepSpeed")
+    parser.add_argument(
+        "--disable_visual_insert",
+        action="store_true",
+        help="Disable top-k visual token insertion during latent reasoning",
+    )
     args = parser.parse_args()
 
     # Initialize DeepSpeed
@@ -303,7 +308,17 @@ def main():
     
     model.print_trainable_parameters()
 
-    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id)
+    model = IVTLR(
+        model,
+        latent_id,
+        start_id,
+        end_id,
+        tokenizer.eos_token_id,
+        image_token_id,
+        visual_start_id,
+        visual_end_id,
+        disable_visual_insert=args.disable_visual_insert,
+    )
 
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
     # model = model.to(rank)

@@ -31,6 +31,7 @@ class IVTLR(nn.Module):
         visual_start_id,
         visual_end_id,
         num_selected_patches: int = 32,
+        disable_visual_insert: bool = False,
     ):
 
         super(IVTLR, self).__init__()
@@ -44,6 +45,7 @@ class IVTLR(nn.Module):
         self.visual_start_id = visual_start_id
         self.visual_end_id = visual_end_id
         self.num_selected_patches = num_selected_patches
+        self.disable_visual_insert = disable_visual_insert
 
         # tested with GPT2 and Llama3
         if isinstance(self.base_causallm, GPT2LMHeadModel):
@@ -155,6 +157,25 @@ class IVTLR(nn.Module):
 
                 all_logits.append(logits_this)
 
+                inputs_embeds_detached = inputs_embeds.detach().clone()
+                for b in range(B):
+                    if len(latent_lists[b]) > pass_idx:
+                        t_idx = latent_lists[b][pass_idx]
+                        rel_pos = t_idx - 1 - hidden_states_offset
+                        rel_pos = max(0, min(rel_pos, hidden_states.size(1) - 1))
+                        inputs_embeds_detached[b, t_idx, :] = hidden_states[b, rel_pos, :]
+
+                inputs_embeds.data = inputs_embeds_detached
+
+                if self.disable_visual_insert:
+                    if pass_idx + 1 >= max_n_latents:
+                        end = inputs_embeds.size(1)
+                    else:
+                        end = end + 1
+                    continue
+                
+                print("Top K insertion - should not be printed")
+
                 #   Top-K
                 avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len)
                 current_seq_len = avg_attn.size(1)
@@ -179,15 +200,6 @@ class IVTLR(nn.Module):
                     select_image_embeds.append(picked)
 
                 select_image_embeds = torch.stack(select_image_embeds, dim=0)  # (B, K, D)
-                inputs_embeds_detached = inputs_embeds.detach().clone()
-                for b in range(B):
-                    if len(latent_lists[b]) > pass_idx:
-                        t_idx = latent_lists[b][pass_idx]
-                        rel_pos = t_idx - 1 - hidden_states_offset
-                        rel_pos = max(0, min(rel_pos, hidden_states.size(1) - 1))
-                        inputs_embeds_detached[b, t_idx, :] = hidden_states[b, rel_pos, :]
-
-                inputs_embeds.data = inputs_embeds_detached
                 new_inputs_embeds = []
                 new_attention_mask = []
                 new_position_ids = []
