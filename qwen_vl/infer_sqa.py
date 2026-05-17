@@ -19,7 +19,12 @@ import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_inference_model(checkpoint_path, model_name, disable_visual_insert=False):
+def load_inference_model(
+    checkpoint_path,
+    model_name,
+    disable_visual_insert=False,
+    disable_reasoning=False,
+):
     processor = AutoProcessor.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
@@ -73,7 +78,8 @@ def load_inference_model(checkpoint_path, model_name, disable_visual_insert=Fals
         image_token_id=image_token_id,
         visual_start_id=visual_start_id, 
         visual_end_id=visual_end_id,
-        disable_visual_insert=disable_visual_insert
+        disable_visual_insert=disable_visual_insert,
+        disable_reasoning=disable_reasoning,
     )
     
     state_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -98,6 +104,11 @@ parser.add_argument(
     "--disable_visual_insert",
     action="store_true",
     help="Disable top-k visual token insertion during latent reasoning",
+)
+parser.add_argument(
+    "--no-reasoning",
+    action="store_true",
+    help="Disable latent reasoning (no hidden-state replacement or visual insertion)",
 )
 parser.add_argument(
     "--disabled_model",
@@ -155,7 +166,8 @@ if not model_name:
 model, processor, tokenizer = load_inference_model(
     args.checkpoint,
     model_name,
-    disable_visual_insert=args.disable_visual_insert,
+    disable_visual_insert=(args.disable_visual_insert or args.no_reasoning),
+    disable_reasoning=args.no_reasoning,
 )
 
 def format_prompt(example):
@@ -220,7 +232,8 @@ def evaluate_and_save(eval_dataset, model, processor):
         }]
         
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        text = text + "<|latent|>" + "<|latent|>" + "<|latent|>"
+        if not args.no_reasoning:
+            text = text + "<|latent|>" + "<|latent|>" + "<|latent|>"
         
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = processor(

@@ -32,6 +32,7 @@ class IVTLR(nn.Module):
         visual_end_id,
         num_selected_patches: int = 32,
         disable_visual_insert: bool = False,
+        disable_reasoning: bool = False,
     ):
 
         super(IVTLR, self).__init__()
@@ -46,6 +47,7 @@ class IVTLR(nn.Module):
         self.visual_end_id = visual_end_id
         self.num_selected_patches = num_selected_patches
         self.disable_visual_insert = disable_visual_insert
+        self.disable_reasoning = disable_reasoning
 
         # tested with GPT2 and Llama3
         if isinstance(self.base_causallm, GPT2LMHeadModel):
@@ -112,7 +114,10 @@ class IVTLR(nn.Module):
             [idx[1].item() for idx in latent_indices if idx[0] == b]
             for b in range(B)
         ]
-        max_n_latents = max((len(lst) for lst in latent_lists), default=0)
+        if self.disable_reasoning:
+            max_n_latents = 0
+        else:
+            max_n_latents = max((len(lst) for lst in latent_lists), default=0)
 
         if max_n_latents > 0:
             first_latent_pos = min(lst[0] for lst in latent_lists if len(lst) > 0)
