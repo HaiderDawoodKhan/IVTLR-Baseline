@@ -261,13 +261,28 @@ def evaluate_and_save(eval_dataset, model, processor):
                 output_text,
                 flags=re.IGNORECASE
             )
-            matches = re.finditer(
+            letter_matches = re.finditer(
                 r'(?:the\s+answer\s+is|Answer:)\s*[\n\s]*([A-Z])',
                 cleaned_text,
                 flags=re.IGNORECASE | re.DOTALL
             )
-            candidates = {match.group(1).upper() for match in matches}
+            candidates = {match.group(1).upper() for match in letter_matches}
+
+            digit_matches = re.finditer(
+                r'(?:the\s+answer\s+is|Answer:)\s*[\n\s]*(\d)',
+                cleaned_text,
+                flags=re.IGNORECASE | re.DOTALL
+            )
+            for match in digit_matches:
+                digit = int(match.group(1))
+                if 0 <= digit <= 3:
+                    candidates.add(chr(ord('A') + digit))
+
             gt_answer = ex["gt_answer"].strip().upper()
+            if gt_answer.isdigit():
+                digit = int(gt_answer)
+                if 0 <= digit <= 3:
+                    gt_answer = chr(ord('A') + digit)
 
             if gt_answer in candidates:
                 correct += 1

@@ -178,8 +178,6 @@ class IVTLR(nn.Module):
                     else:
                         end = end + 1
                     continue
-                
-                print("Top K insertion - should not be printed")
 
                 #   Top-K
                 avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len)
