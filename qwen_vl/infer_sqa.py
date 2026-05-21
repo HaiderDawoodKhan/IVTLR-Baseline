@@ -116,10 +116,15 @@ parser.add_argument(
     action="store_true",
     help="If model was trained using disabled visual insert, make dir accordingly"
 )
+parser.add_argument(
+    "--output_root",
+    default="outuputs_dynamic_ivtlr",
+    help="Root directory for inference outputs",
+)
 args = parser.parse_args()
 
-os.makedirs("output", exist_ok=True)
-base_output_dir = "output/inference/sqa"
+os.makedirs(args.output_root, exist_ok=True)
+base_output_dir = os.path.join(args.output_root, "inference", "sqa")
 if args.disabled_model:
     base_output_dir += "_no_vis"
 output_dir = os.path.join(base_output_dir, args.run_tag) if args.run_tag else base_output_dir

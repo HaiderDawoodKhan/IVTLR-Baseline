@@ -1,5 +1,5 @@
 project: ivtlr
-save_path: "/home/csalt/Haider/DVLM/IVT-LR/qwen_vl/output"
+save_path: "outuputs_dynamic_ivtlr"
 name: qwen_IVTLR_sqa_no_vis
 model_name: Qwen/Qwen2-VL-2B-Instruct
 

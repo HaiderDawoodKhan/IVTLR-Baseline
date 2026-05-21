@@ -8,6 +8,8 @@ cd "$ROOT"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONUNBUFFERED=1
 
+OUTPUT_ROOT="outuputs_dynamic_ivtlr"
+
 find_latest_checkpoint() {
   local dir="$1"
   local latest
@@ -31,7 +33,7 @@ eval_m3cot() {
   }
 
   echo "Using M3CoT checkpoint: $checkpoint"
-  python "infer_m3cot.py" --config "$config_file" --checkpoint "$checkpoint" --run_tag "$run_tag"
+  python "infer_m3cot.py" --config "$config_file" --checkpoint "$checkpoint" --run_tag "$run_tag" --output_root "$OUTPUT_ROOT"
 }
 
 eval_sqa() {
@@ -46,10 +48,10 @@ eval_sqa() {
   }
 
   echo "Using ScienceQA checkpoint: $checkpoint"
-  python "infer_sqa.py" --config "$config_file" --checkpoint "$checkpoint" --run_tag "$run_tag"
+  python "infer_sqa.py" --config "$config_file" --checkpoint "$checkpoint" --run_tag "$run_tag" --output_root "$OUTPUT_ROOT"
 }
 
-eval_m3cot "output/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
-eval_sqa "output/qwen_IVTLR_sqa" "args/qwen_sqa.yaml" "latest_dynamic_hidden_distill"
-eval_m3cot "output/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
-eval_sqa "output/qwen_IVTLR_sqa_no_hidden_distill" "args/qwen_sqa_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
+eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
+eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa" "args/qwen_sqa.yaml" "latest_dynamic_hidden_distill"
+eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
+eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa_no_hidden_distill" "args/qwen_sqa_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
