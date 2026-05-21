@@ -32,6 +32,7 @@ from dataset import (
     get_cot_latent_dataset,
     MyCollator,
     get_dynamic_latent_counts,
+    get_epoch_lambda_hidden,
     get_epoch_rho,
     group_steps_to_max,
     split_rationale_into_sentences,
@@ -68,6 +69,7 @@ class LazyScienceQACollator:
         processor,
         configs,
         rho,
+        lambda_hidden,
         latent_id,
         start_id,
         end_id,
@@ -79,6 +81,7 @@ class LazyScienceQACollator:
         self.processor = processor
         self.configs = configs
         self.rho = rho
+        self.lambda_hidden = lambda_hidden
         self.latent_id = latent_id
         self.start_id = start_id
         self.end_id = end_id
@@ -183,7 +186,7 @@ class LazyScienceQACollator:
             + tokens[n_latent_tokens + len(question_tokenized):]
         )
 
-        return {
+        feature = {
             "input_ids": tokens,
             "labels": labels,
             "attention_mask": [1] * len(tokens),
@@ -193,18 +196,93 @@ class LazyScienceQACollator:
             "idx": int(sample["idx"]),
         }
 
+        if self.lambda_hidden > 0 and n_latent_tokens > 0:
+            teacher_tokens = (
+                question_tokenized
+                + list(itertools.chain.from_iterable(steps_tokenized))
+                + answer_tokenized
+            )
+            teacher_sentence_end_positions = []
+            cursor = len(question_tokenized)
+            for step_idx, step_tokens in enumerate(steps_tokenized):
+                cursor += len(step_tokens)
+                if step_idx < n_latent_tokens:
+                    teacher_sentence_end_positions.append(cursor - 1)
+
+            feature.update(
+                {
+                    "teacher_input_ids": teacher_tokens,
+                    "teacher_attention_mask": [1] * len(teacher_tokens),
+                    "teacher_position_ids": list(range(len(teacher_tokens))),
+                    "teacher_sentence_end_positions": teacher_sentence_end_positions,
+                    "teacher_alignment_mask": [True] * len(teacher_sentence_end_positions),
+                }
+            )
+
+        return feature
+
     def __call__(self, features):
         processed_features = [self._build_one_feature(sample) for sample in features]
 
         pixel_values_list = [f.pop("pixel_values") for f in processed_features]
         image_grid_thw_list = [f.pop("image_grid_thw") for f in processed_features]
         idx_list = [f.pop("idx") for f in processed_features]
+        has_teacher_alignment = "teacher_input_ids" in processed_features[0]
+        if has_teacher_alignment:
+            teacher_input_ids_list = [f.pop("teacher_input_ids") for f in processed_features]
+            teacher_attention_mask_list = [f.pop("teacher_attention_mask") for f in processed_features]
+            teacher_position_ids_list = [f.pop("teacher_position_ids") for f in processed_features]
+            teacher_sentence_end_positions_list = [
+                f.pop("teacher_sentence_end_positions") for f in processed_features
+            ]
+            teacher_alignment_mask_list = [f.pop("teacher_alignment_mask") for f in processed_features]
 
         batch = self.base_collator(processed_features)
 
         batch["pixel_values"] = torch.cat(pixel_values_list, dim=0)
         batch["image_grid_thw"] = torch.stack(image_grid_thw_list, dim=0)
         batch["idx"] = torch.tensor(idx_list, dtype=torch.long)
+        batch["lambda_hidden"] = torch.tensor(self.lambda_hidden, dtype=torch.float32)
+
+        if has_teacher_alignment:
+            max_teacher_len = max(len(ids) for ids in teacher_input_ids_list)
+            batch["teacher_input_ids"] = torch.tensor(
+                [
+                    ids + [self.tokenizer.pad_token_id] * (max_teacher_len - len(ids))
+                    for ids in teacher_input_ids_list
+                ],
+                dtype=torch.long,
+            )
+            batch["teacher_attention_mask"] = torch.tensor(
+                [
+                    mask + [0] * (max_teacher_len - len(mask))
+                    for mask in teacher_attention_mask_list
+                ],
+                dtype=torch.long,
+            )
+            batch["teacher_position_ids"] = torch.tensor(
+                [
+                    pos + [0] * (max_teacher_len - len(pos))
+                    for pos in teacher_position_ids_list
+                ],
+                dtype=torch.long,
+            )
+
+            max_align_steps = max(1, max(len(pos) for pos in teacher_sentence_end_positions_list))
+            batch["teacher_sentence_end_positions"] = torch.tensor(
+                [
+                    pos + [-1] * (max_align_steps - len(pos))
+                    for pos in teacher_sentence_end_positions_list
+                ],
+                dtype=torch.long,
+            )
+            batch["teacher_alignment_mask"] = torch.tensor(
+                [
+                    mask + [False] * (max_align_steps - len(mask))
+                    for mask in teacher_alignment_mask_list
+                ],
+                dtype=torch.bool,
+            )
 
         return batch
     
@@ -461,6 +539,7 @@ def main():
     for epoch in range(configs.resume, configs.num_epochs):
 
         rho = get_epoch_rho(epoch, configs)
+        lambda_hidden = get_epoch_lambda_hidden(epoch, configs)
 
         np.random.seed(epoch) 
 
@@ -493,6 +572,7 @@ def main():
             processor=processor,
             configs=configs,
             rho=rho,
+            lambda_hidden=lambda_hidden,
             latent_id=latent_id,
             start_id=start_id,
             end_id=end_id,
@@ -552,6 +632,8 @@ def main():
 
             outputs = model_engine(**batch)
             loss = outputs.loss
+            loss_ce = outputs.loss_ce.detach().float()
+            loss_hidden = outputs.loss_hidden.detach().float()
             print(f"loss: {loss}")
             model_engine.backward(loss)
             model_engine.step()
@@ -562,13 +644,17 @@ def main():
                     "train/step": epoch * len(train_dataloader) + step,
                     "train/loss": loss.detach().float(),
                     "train/rho": rho,
+                    "train/lambda_hidden": lambda_hidden,
+                    "train/loss_ce": loss_ce,
+                    "train/loss_hidden": loss_hidden,
                     # * configs.gradient_accumulation_steps,
                 }
                 wandb_run.log(log_dict)
             # print("line432")
             pbar.set_description(
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
-                f"completed (loss: {round(float(loss.detach().float()), 4)}"
+                f"completed (loss: {round(float(loss.detach().float()), 4)}, "
+                f"loss_hidden: {round(float(loss_hidden), 4)}, rho: {rho}, lambda_h: {lambda_hidden})"
             )
             print("finish")
         pbar.close()

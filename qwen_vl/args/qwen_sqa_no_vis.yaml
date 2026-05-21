@@ -6,7 +6,9 @@ model_name: Qwen/Qwen2-VL-2B-Instruct
 epochs_per_stage: 4
 max_latent_stage: 20
 pad_latent_to_max: True
+hidden_state_alignment: True
 rho_schedule: [0.0, 0.0, 0.2, 0.2, 0.4, 0.4, 0.6, 0.6, 0.8, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+lambda_hidden_schedule: [0.0, 0.0, 0.1, 0.1, 0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.4, 0.4, 0.2, 0.2, 0.0, 0.0]
 
 load_model_path: None
 seed: 0

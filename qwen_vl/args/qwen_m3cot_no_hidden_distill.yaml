@@ -1,12 +1,12 @@
 project: ivtlr
 save_path: "/home/csalt/Haider/DVLM/IVT-LR/qwen_vl/output"
-name: qwen_IVTLR_m3cot_no_vis
+name: qwen_IVTLR_m3cot_no_hidden_distill
 model_name: Qwen/Qwen2-VL-2B-Instruct
 
 epochs_per_stage: 4
 max_latent_stage: 20
 pad_latent_to_max: True
-hidden_state_alignment: True
+hidden_state_alignment: False
 rho_schedule: [0.0, 0.0, 0.2, 0.2, 0.4, 0.4, 0.6, 0.6, 0.8, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 lambda_hidden_schedule: [0.0, 0.0, 0.1, 0.1, 0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.4, 0.4, 0.2, 0.2, 0.0, 0.0]
 

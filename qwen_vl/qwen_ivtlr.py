@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from collections import namedtuple
 from transformers.models.gpt2 import GPT2LMHeadModel
-from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 import logging
 logging.basicConfig(
     filename='qwenvl_32_infer_sqa_time_epoch4.log',
@@ -14,7 +14,7 @@ logging.basicConfig(
 import pdb
 from transformers.cache_utils import DynamicCache
 
-Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
+Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits", "loss_ce", "loss_hidden"])
 MAX_N_LATENT = 4
 
 
@@ -65,6 +65,12 @@ class IVTLR(nn.Module):
         position_ids: torch.LongTensor,      # shape = (B, S)
         pixel_values: torch.FloatTensor,     # shape = (B, 3, H, W)
         image_grid_thw: torch.Tensor = None,
+        teacher_input_ids: torch.LongTensor = None,
+        teacher_attention_mask: torch.LongTensor = None,
+        teacher_position_ids: torch.LongTensor = None,
+        teacher_sentence_end_positions: torch.LongTensor = None,
+        teacher_alignment_mask: torch.Tensor = None,
+        lambda_hidden: torch.Tensor = None,
         **kwargs
     ):
 
@@ -126,6 +132,7 @@ class IVTLR(nn.Module):
         
         kv_cache = None
         all_logits = []
+        student_latent_states = []
 
         if max_n_latents > 0:
             for pass_idx in range(max_n_latents):
@@ -162,13 +169,16 @@ class IVTLR(nn.Module):
                 all_logits.append(logits_this)
 
                 inputs_embeds_detached = inputs_embeds.detach().clone()
+                pass_student_states = hidden_states.new_zeros((B, hidden_states.size(-1)))
                 for b in range(B):
                     if len(latent_lists[b]) > pass_idx:
                         t_idx = latent_lists[b][pass_idx]
                         rel_pos = t_idx - 1 - hidden_states_offset
                         rel_pos = max(0, min(rel_pos, hidden_states.size(1) - 1))
+                        pass_student_states[b, :] = hidden_states[b, rel_pos, :]
                         inputs_embeds_detached[b, t_idx, :] = hidden_states[b, rel_pos, :]
 
+                student_latent_states.append(pass_student_states)
                 inputs_embeds.data = inputs_embeds_detached
 
                 if self.disable_visual_insert:
@@ -325,9 +335,75 @@ class IVTLR(nn.Module):
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = new_labels[..., 1:].contiguous()
         loss_fct = CrossEntropyLoss(ignore_index=-100)
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        loss_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        loss_hidden = loss_ce.new_tensor(0.0)
 
-        return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits)
+        if (
+            lambda_hidden is not None
+            and teacher_input_ids is not None
+            and teacher_sentence_end_positions is not None
+            and teacher_alignment_mask is not None
+        ):
+            if torch.is_tensor(lambda_hidden):
+                lambda_hidden_value = lambda_hidden.to(device=loss_ce.device, dtype=loss_ce.dtype)
+            else:
+                lambda_hidden_value = loss_ce.new_tensor(float(lambda_hidden))
+
+            teacher_alignment_mask = teacher_alignment_mask.to(device=input_ids.device, dtype=torch.bool)
+            if (
+                lambda_hidden_value.item() > 0
+                and teacher_alignment_mask.any()
+                and len(student_latent_states) > 0
+            ):
+                student_states = torch.stack(student_latent_states, dim=1)
+                teacher_sentence_end_positions = teacher_sentence_end_positions.to(input_ids.device)
+
+                with torch.no_grad():
+                    teacher_outputs = self.base_causallm(
+                        input_ids=teacher_input_ids,
+                        attention_mask=teacher_attention_mask,
+                        position_ids=teacher_position_ids,
+                        pixel_values=pixel_values,
+                        image_grid_thw=image_grid_thw,
+                        output_hidden_states=True,
+                        output_attentions=False,
+                    )
+                    teacher_hidden_states = teacher_outputs.hidden_states[-1]
+
+                max_align_steps = min(
+                    student_states.size(1),
+                    teacher_sentence_end_positions.size(1),
+                )
+                if max_align_steps > 0:
+                    active_mask = teacher_alignment_mask[:, :max_align_steps]
+                    if active_mask.any():
+                        gather_positions = teacher_sentence_end_positions[:, :max_align_steps].clamp(min=0)
+                        gather_positions = gather_positions.unsqueeze(-1).expand(
+                            -1, -1, teacher_hidden_states.size(-1)
+                        )
+                        teacher_states = torch.gather(
+                            teacher_hidden_states,
+                            dim=1,
+                            index=gather_positions,
+                        )
+                        hidden_losses = 1.0 - F.cosine_similarity(
+                            student_states[:, :max_align_steps, :].float(),
+                            teacher_states.detach().float(),
+                            dim=-1,
+                        )
+                        loss_hidden = hidden_losses[active_mask].mean().to(loss_ce.dtype)
+
+            loss = loss_ce + lambda_hidden_value * loss_hidden
+        else:
+            loss = loss_ce
+
+        return Outputs(
+            loss=loss,
+            inputs_embeds=inputs_embeds,
+            logits=logits,
+            loss_ce=loss_ce,
+            loss_hidden=loss_hidden,
+        )
 
 
     def train(self, mode=True):
@@ -468,4 +544,3 @@ class IVTLR(nn.Module):
             return torch.tensor(tokens).view(1, -1), current_inputs_embeds
         else:
             return torch.tensor(tokens).view(1, -1)
-

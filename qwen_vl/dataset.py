@@ -32,6 +32,16 @@ DEFAULT_RHO_SCHEDULE = (
     0.8, 0.8,
     1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
 )
+DEFAULT_LAMBDA_HIDDEN_SCHEDULE = (
+    0.0, 0.0,
+    0.1, 0.1,
+    0.3, 0.3,
+    0.5, 0.5,
+    0.5, 0.5,
+    0.4, 0.4,
+    0.2, 0.2,
+    0.0, 0.0,
+)
 
 
 def get_epoch_rho(epoch: int, configs) -> float:
@@ -40,6 +50,16 @@ def get_epoch_rho(epoch: int, configs) -> float:
         schedule = DEFAULT_RHO_SCHEDULE
     rho = float(schedule[min(epoch, len(schedule) - 1)])
     return max(0.0, min(1.0, rho))
+
+
+def get_epoch_lambda_hidden(epoch: int, configs) -> float:
+    if not getattr(configs, "hidden_state_alignment", True):
+        return 0.0
+
+    schedule = getattr(configs, "lambda_hidden_schedule", DEFAULT_LAMBDA_HIDDEN_SCHEDULE)
+    if not schedule:
+        schedule = DEFAULT_LAMBDA_HIDDEN_SCHEDULE
+    return max(0.0, float(schedule[min(epoch, len(schedule) - 1)]))
 
 
 def split_rationale_into_sentences(rationale: str) -> list[str]:
