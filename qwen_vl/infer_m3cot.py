@@ -18,6 +18,7 @@ import pdb
 import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+INFERENCE_LATENT_STEPS = 10
 
 def load_inference_model(
     checkpoint_path,
@@ -222,7 +223,7 @@ def evaluate_and_save(eval_dataset, model, processor):
             }]
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             if not args.no_reasoning:
-                text = text + "<|latent|>" + "<|latent|>" + "<|latent|>"
+                text = text + ("<|latent|>" * INFERENCE_LATENT_STEPS)
             image_inputs, video_inputs = process_vision_info(messages)
             inputs = processor(
                 text=[text],

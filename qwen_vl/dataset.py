@@ -1,6 +1,8 @@
 import json
 import itertools
+import math
 import random
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -10,7 +12,6 @@ from datasets import Dataset
 from transformers import PreTrainedTokenizerBase
 from transformers.data.data_collator import pad_without_fast_tokenizer_warning
 from datasets import load_dataset
-from transformers import ChameleonProcessor
 import pdb
 import logging
 from itertools import count
@@ -22,6 +23,58 @@ logging.basicConfig(
     format='[%(asctime)s] %(message)s', 
     datefmt='%Y-%m-%d %H:%M:%S' 
 )
+
+DEFAULT_RHO_SCHEDULE = (
+    0.0, 0.0,
+    0.2, 0.2,
+    0.4, 0.4,
+    0.6, 0.6,
+    0.8, 0.8,
+    1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+)
+
+
+def get_epoch_rho(epoch: int, configs) -> float:
+    schedule = getattr(configs, "rho_schedule", DEFAULT_RHO_SCHEDULE)
+    if not schedule:
+        schedule = DEFAULT_RHO_SCHEDULE
+    rho = float(schedule[min(epoch, len(schedule) - 1)])
+    return max(0.0, min(1.0, rho))
+
+
+def split_rationale_into_sentences(rationale: str) -> list[str]:
+    rationale = (rationale or "").replace("\n", " ").strip()
+    if not rationale:
+        return []
+
+    sentences = re.findall(r"[^.!?]+(?:[.!?]+|$)", rationale)
+    return [sentence.strip() for sentence in sentences if sentence.strip()]
+
+
+def group_steps_to_max(steps: list[str], max_steps: int) -> list[str]:
+    if max_steps <= 0:
+        return []
+    if len(steps) <= max_steps:
+        return steps
+
+    grouped_steps = []
+    start = 0
+    for group_idx in range(max_steps):
+        remaining_items = len(steps) - start
+        remaining_groups = max_steps - group_idx
+        group_size = math.ceil(remaining_items / remaining_groups)
+        end = start + group_size
+        grouped_steps.append(" ".join(steps[start:end]).strip())
+        start = end
+    return grouped_steps
+
+
+def get_dynamic_latent_counts(num_steps: int, rho: float) -> tuple[int, int]:
+    if num_steps <= 0:
+        return 0, 0
+    n_latent_tokens = int(math.ceil(rho * num_steps))
+    n_latent_tokens = max(0, min(num_steps, n_latent_tokens))
+    return n_latent_tokens, n_latent_tokens
 
 
 def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
@@ -199,7 +252,7 @@ class MyCollator:
         return batch
 
 def get_cot_latent_dataset(
-    scheduled_stage,
+    rho,
     base_dataset,
     configs,
     start_id,
@@ -212,22 +265,10 @@ def get_cot_latent_dataset(
     n_additional_tokens = 0 if no_special_marker else 2
 
     def process_dataset(sample):
-        scheduled_stage_to_train = scheduled_stage
-        
-        if scheduled_stage_to_train > configs.max_latent_stage:
-            n_skip_steps = 10000  # skip all
-            if configs.pad_latent_to_max:
-                n_latent_tokens = configs.max_latent_stage
-            else:
-                n_latent_tokens = min(
-                    len(sample["steps_tokenized"]), configs.max_latent_stage
-                )
-
-        else:
-            n_skip_steps, n_latent_tokens = (
-                scheduled_stage_to_train,
-                scheduled_stage_to_train,
-            )
+        n_skip_steps, n_latent_tokens = get_dynamic_latent_counts(
+            len(sample["steps_tokenized"]),
+            float(rho),
+        )
 
         tokens = (
             sample["question_tokenized"]

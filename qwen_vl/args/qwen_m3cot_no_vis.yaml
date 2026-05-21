@@ -4,8 +4,9 @@ name: qwen_IVTLR_m3cot_no_vis
 model_name: Qwen/Qwen2-VL-2B-Instruct
 
 epochs_per_stage: 4
-max_latent_stage: 5
+max_latent_stage: 20
 pad_latent_to_max: True
+rho_schedule: [0.0, 0.0, 0.2, 0.2, 0.4, 0.4, 0.6, 0.6, 0.8, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 load_model_path: None
 seed: 0

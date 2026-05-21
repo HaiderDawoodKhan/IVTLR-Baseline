@@ -32,6 +32,10 @@ from dataset import (
     get_dataset,
     get_cot_latent_dataset,
     MyCollator,
+    get_dynamic_latent_counts,
+    get_epoch_rho,
+    group_steps_to_max,
+    split_rationale_into_sentences,
 )
 
 from tqdm import tqdm
@@ -63,7 +67,7 @@ class LazyM3CoTCollator:
         tokenizer,
         processor,
         configs,
-        scheduled_stage,
+        rho,
         latent_id,
         start_id,
         end_id,
@@ -74,7 +78,7 @@ class LazyM3CoTCollator:
         self.tokenizer = tokenizer
         self.processor = processor
         self.configs = configs
-        self.scheduled_stage = scheduled_stage
+        self.rho = rho
         self.latent_id = latent_id
         self.start_id = start_id
         self.end_id = end_id
@@ -168,22 +172,11 @@ class LazyM3CoTCollator:
 
             steps_tokenized = new_steps_tokenized
 
-        # 5. Apply IVT-LR scheduled latent training logic.
-        scheduled_stage_to_train = self.scheduled_stage
-
-        if scheduled_stage_to_train > self.configs.max_latent_stage:
-            n_skip_steps = 10000
-
-            if self.configs.pad_latent_to_max:
-                n_latent_tokens = self.configs.max_latent_stage
-            else:
-                n_latent_tokens = min(
-                    len(steps_tokenized),
-                    self.configs.max_latent_stage,
-                )
-        else:
-            n_skip_steps = scheduled_stage_to_train
-            n_latent_tokens = scheduled_stage_to_train
+        # 5. Replace the first ceil(rho * K) sentence steps with latent tokens.
+        n_skip_steps, n_latent_tokens = get_dynamic_latent_counts(
+            len(steps_tokenized),
+            self.rho,
+        )
 
         tokens = (
             question_tokenized
@@ -424,26 +417,11 @@ def main():
     #     return example
 
     def process_example(example):
-        rationale = example["rationale"].replace("\n", " ").strip()
-        example["steps"] = rationale.split(". ")
-
-        if len(example["steps"]) > 0 and example["steps"][-1] == "":
-            example["steps"].pop()
-
-        if len(example["steps"]) > 3:
-            total_steps = len(example["steps"])
-            step_size = total_steps // 3
-            remainder = total_steps % 3
-
-            new_steps = []
-            start = 0
-
-            for i in range(3):
-                end = start + step_size + (1 if i < remainder else 0)
-                new_steps.append(". ".join(example["steps"][start:end]))
-                start = end
-
-            example["steps"] = new_steps
+        steps = split_rationale_into_sentences(example["rationale"])
+        example["steps"] = group_steps_to_max(
+            steps,
+            getattr(configs, "max_latent_stage", 20),
+        )
 
         question = example["question"]
         choices = example["choices"]
@@ -538,7 +516,7 @@ def main():
 
     for epoch in range(configs.resume, configs.num_epochs):
 
-        scheduled_stage = epoch // configs.epochs_per_stage
+        rho = get_epoch_rho(epoch, configs)
 
         np.random.seed(epoch) 
 
@@ -568,7 +546,7 @@ def main():
             tokenizer=tokenizer,
             processor=processor,
             configs=configs,
-            scheduled_stage=scheduled_stage,
+            rho=rho,
             latent_id=latent_id,
             start_id=start_id,
             end_id=end_id,
@@ -632,7 +610,8 @@ def main():
                 log_dict = {
                     "train/epoch": epoch + 1,
                     "train/step": epoch * len(train_dataloader) + step,
-                    "train/loss": loss.detach().float()
+                    "train/loss": loss.detach().float(),
+                    "train/rho": rho,
                     # * configs.gradient_accumulation_steps,
                 }
                 wandb_run.log(log_dict)

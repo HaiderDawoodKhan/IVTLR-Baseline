@@ -100,8 +100,7 @@ class IVTLR(nn.Module):
             image_mask_init = torch.zeros((B, S), dtype=torch.bool, device=input_ids.device)
         
 
-        max_len = 3000
-        image_mask = torch.zeros((B, max_len), dtype=torch.bool, device=input_ids.device)
+        image_mask = torch.zeros((B, S), dtype=torch.bool, device=input_ids.device)
         image_mask[:, :S] = image_mask_init
 
 
@@ -469,5 +468,4 @@ class IVTLR(nn.Module):
             return torch.tensor(tokens).view(1, -1), current_inputs_embeds
         else:
             return torch.tensor(tokens).view(1, -1)
-
 
