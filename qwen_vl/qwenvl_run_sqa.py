@@ -312,6 +312,11 @@ def main():
         config_dict = yaml.safe_load(f)
 
     configs = Config(config_dict)
+    disable_visual_insert = args.disable_visual_insert or getattr(
+        configs,
+        "disable_visual_insert",
+        True,
+    )
     set_seed(configs.seed)
     save_dir = os.path.join(configs.save_path, configs.name)
     model_name = getattr(configs, "model_name", "Qwen/Qwen2-VL-2B-Instruct")
@@ -388,7 +393,7 @@ def main():
         image_token_id,
         visual_start_id,
         visual_end_id,
-        disable_visual_insert=args.disable_visual_insert,
+        disable_visual_insert=disable_visual_insert,
     )
 
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
