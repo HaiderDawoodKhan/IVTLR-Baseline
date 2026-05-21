@@ -18,6 +18,6 @@ run_deepspeed() {
 }
 
 run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
-run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa.yaml" "qwenvl_scienceqa_dynamic_hidden_distill.log"
 run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
+run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa.yaml" "qwenvl_scienceqa_dynamic_hidden_distill.log"
 run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa_no_hidden_distill.yaml" "qwenvl_scienceqa_dynamic_no_hidden_distill.log"

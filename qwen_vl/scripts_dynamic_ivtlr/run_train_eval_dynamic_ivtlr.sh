@@ -6,9 +6,18 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export MASTER_PORT="${MASTER_PORT:-29501}"
 export PYTHONUNBUFFERED=1
 
 OUTPUT_ROOT="outuputs_dynamic_ivtlr"
+
+run_deepspeed() {
+  local script="$1"
+  local config_file="$2"
+  local log_file="$3"
+
+  deepspeed --master_port "$MASTER_PORT" "$script" "$config_file" --deepspeed --deepspeed_config ds_config.json 2>&1 | tee "$log_file"
+}
 
 find_latest_checkpoint() {
   local dir="$1"
@@ -51,7 +60,15 @@ eval_sqa() {
   python "infer_sqa.py" --config "$config_file" --checkpoint "$checkpoint" --run_tag "$run_tag" --output_root "$OUTPUT_ROOT"
 }
 
+# Finish all M3CoT variants before starting ScienceQA.
+run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
 eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
+
+run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
 eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
+
+run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa.yaml" "qwenvl_scienceqa_dynamic_hidden_distill.log"
 eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa" "args/qwen_sqa.yaml" "latest_dynamic_hidden_distill"
+
+run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa_no_hidden_distill.yaml" "qwenvl_scienceqa_dynamic_no_hidden_distill.log"
 eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa_no_hidden_distill" "args/qwen_sqa_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
