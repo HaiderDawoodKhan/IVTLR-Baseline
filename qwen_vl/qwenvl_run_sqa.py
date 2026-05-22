@@ -498,7 +498,7 @@ def main():
             start_id=start_id,
             end_id=end_id,
             label_pad_token_id=-100,
-            max_length=3400,
+            max_length=3200,
             image_size=280,
         )
 
