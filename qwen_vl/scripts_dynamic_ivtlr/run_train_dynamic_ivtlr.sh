@@ -8,6 +8,7 @@ cd "$ROOT"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export MASTER_PORT="${MASTER_PORT:-29501}"
 export PYTHONUNBUFFERED=1
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
 run_deepspeed() {
   local script="$1"
