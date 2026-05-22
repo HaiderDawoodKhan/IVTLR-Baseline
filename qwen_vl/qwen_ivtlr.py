@@ -11,11 +11,8 @@ logging.basicConfig(
     format='[%(asctime)s] %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'  
 )
-import pdb
-from transformers.cache_utils import DynamicCache
 
 Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits", "loss_ce", "loss_hidden"])
-MAX_N_LATENT = 4
 
 
 class IVTLR(nn.Module):
@@ -49,14 +46,11 @@ class IVTLR(nn.Module):
         self.disable_visual_insert = disable_visual_insert
         self.disable_reasoning = disable_reasoning
 
-        # tested with GPT2 and Llama3
         if isinstance(self.base_causallm, GPT2LMHeadModel):
             self.embedding = self.base_causallm.transformer.get_input_embeddings()
         else:
             self.embedding = self.base_causallm.get_input_embeddings()
         
-        # self.processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
-        # self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
     def forward(
         self,
         input_ids: torch.LongTensor,        # shape = (B, S)
@@ -76,14 +70,7 @@ class IVTLR(nn.Module):
 
         B, S = input_ids.size()
 
-        # decode
-        # _ = self.processor.tokenizer.batch_decode(
-        #     input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True
-        # )
-
         inputs_embeds = self.embedding(input_ids)  # (B, S, D)
-
-        original_mask = torch.ones((B, S), dtype=torch.bool, device=input_ids.device)
 
         vs_indices = (input_ids == self.visual_start_id).nonzero(as_tuple=True)
         ve_indices = (input_ids == self.visual_end_id).nonzero(as_tuple=True)
@@ -91,6 +78,8 @@ class IVTLR(nn.Module):
         ve_pos_per_batch = {b.item(): ve_indices[1][i].item() for i, b in enumerate(ve_indices[0])}
 
         if pixel_values is not None:
+            # Qwen-VL expects image features to be injected at image-token
+            # positions before the language-model passes begin.
             pixel_values = pixel_values.type(self.base_causallm.visual.get_dtype())
             image_embeds = self.base_causallm.visual(pixel_values, grid_thw=image_grid_thw)
             n_image_tokens = (input_ids == self.image_token_id).sum().item()
@@ -168,6 +157,9 @@ class IVTLR(nn.Module):
 
                 all_logits.append(logits_this)
 
+                # Each latent token is filled with the hidden state immediately
+                # before it. These same states are the student side of the
+                # optional hidden-alignment loss.
                 inputs_embeds_detached = inputs_embeds.detach().clone()
                 pass_student_states = hidden_states.new_zeros((B, hidden_states.size(-1)))
                 for b in range(B):
@@ -188,7 +180,10 @@ class IVTLR(nn.Module):
                         end = end + 1
                     continue
 
-                #   Top-K
+                # Use the current latent state attention to pick visual patches
+                # that are inserted between latent reasoning steps. Insertions
+                # change sequence length, so latent positions after `end` are
+                # shifted by the number of selected visual embeddings.
                 avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len)
                 current_seq_len = avg_attn.size(1)
                 select_image_embeds = []
@@ -215,9 +210,7 @@ class IVTLR(nn.Module):
                 new_inputs_embeds = []
                 new_attention_mask = []
                 new_position_ids = []
-                new_original_mask = []
                 new_image_mask = []
-                batch_max_len = 0
 
                 for b in range(B):
                     end_b = end
@@ -227,56 +220,40 @@ class IVTLR(nn.Module):
                     merged_b = torch.cat([prefix_b, v_embed_b, suffix_b], dim=0)  # (old_len+K, D)
                     new_inputs_embeds.append(merged_b)
 
-                    # attention_mask
                     att_pref = attention_mask[b, :end_b]      # (end_b,)
                     att_suf  = attention_mask[b, end_b:]      # (old_len-end_b,)
                     att_v    = torch.ones(self.num_selected_patches, device=attention_mask.device, dtype=attention_mask.dtype)
                     merged_att = torch.cat([att_pref, att_v, att_suf], dim=0)  # (new_len,)
                     new_attention_mask.append(merged_att)
 
-                    # position_ids 
                     new_pos = torch.arange(merged_b.size(0), device=position_ids.device)
                     new_position_ids.append(new_pos)
 
-                    # original_mask
-                    orig_pref = original_mask[b, :end_b]       # (end_b,)
-                    orig_suf  = original_mask[b, end_b:]       # (old_len-end_b,)
-                    orig_v    = torch.zeros(self.num_selected_patches, device=input_ids.device, dtype=torch.bool)
-                    merged_orig = torch.cat([orig_pref, orig_v, orig_suf], dim=0)
-                    new_original_mask.append(merged_orig)
-
-                    # image_mask
                     img_pref = image_mask[b, :end_b]
                     img_suf  = image_mask[b, end_b:]
                     img_v    = torch.zeros(self.num_selected_patches, device=input_ids.device, dtype=torch.bool)
                     merged_img = torch.cat([img_pref, img_v, img_suf], dim=0)
                     new_image_mask.append(merged_img)
 
-                    batch_max_len = max(batch_max_len, merged_b.size(0))
-
                 padded_embeds = []
                 padded_att   = []
                 padded_pos   = []
-                padded_orig  = []
                 padded_img   = []
 
                 for b in range(B):
                     emb_b = new_inputs_embeds[b]
                     att_b = new_attention_mask[b]
                     pos_b = new_position_ids[b]
-                    orig_b = new_original_mask[b]
                     img_b = new_image_mask[b]
 
                     padded_embeds.append(emb_b.unsqueeze(0))
                     padded_att.append(att_b.unsqueeze(0))
                     padded_pos.append(pos_b.unsqueeze(0))
-                    padded_orig.append(orig_b.unsqueeze(0))
                     padded_img.append(img_b.unsqueeze(0))
 
                 inputs_embeds = torch.cat(padded_embeds, dim=0)    
                 attention_mask = torch.cat(padded_att, dim=0)      
                 position_ids    = torch.cat(padded_pos, dim=0)     
-                original_mask  = torch.cat(padded_orig, dim=0)
                 image_mask     = torch.cat(padded_img, dim=0)   # (B, new_S)
                 K = self.num_selected_patches
                 for b in range(B):
@@ -324,6 +301,9 @@ class IVTLR(nn.Module):
             )
             all_logits.append(outputs.logits)
 
+        # `all_logits` contains the incremental latent passes plus the final
+        # suffix pass. The original labels are right-aligned against this longer
+        # logit stream because visual patch insertions add non-label positions.
         logits = torch.cat(all_logits, dim=-2)  # (B, total_len, V)
         B, final_S, V = logits.size()
 
@@ -358,6 +338,9 @@ class IVTLR(nn.Module):
                 student_states = torch.stack(student_latent_states, dim=1)
                 teacher_sentence_end_positions = teacher_sentence_end_positions.to(input_ids.device)
 
+                # Teacher states come from the explicit-CoT sequence and are
+                # detached by construction. This keeps CE as the only signal
+                # updating the teacher path while aligning student latent states.
                 with torch.no_grad():
                     teacher_outputs = self.base_causallm(
                         input_ids=teacher_input_ids,

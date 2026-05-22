@@ -14,7 +14,6 @@ import time
 from datetime import timedelta
 import argparse
 import yaml
-import pdb
 import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -296,7 +295,6 @@ def evaluate_and_save(eval_dataset, model, processor):
             total += 1
             logging.debug(f"[TOTAL] {total}")
 
-            # pdb.set_trace()
             message_question = ex["question_raw"]
             message_question = message_question.replace("<image>", "", 1).replace("Answer:", "", 1).strip()
             message_question = message_question.split("Answer:")[0].strip()

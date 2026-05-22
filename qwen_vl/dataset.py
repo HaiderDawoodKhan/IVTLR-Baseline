@@ -1,20 +1,14 @@
-import json
 import itertools
 import math
-import random
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 import torch.distributed as dist
-from datasets import Dataset
 from transformers import PreTrainedTokenizerBase
 from transformers.data.data_collator import pad_without_fast_tokenizer_warning
-from datasets import load_dataset
-import pdb
 import logging
-from itertools import count
 
 
 logging.basicConfig(
@@ -49,6 +43,9 @@ DEFAULT_LAMBDA_HIDDEN_SCHEDULE = (
 
 
 def get_epoch_rho(epoch: int, configs) -> float:
+    # The curriculum is epoch-indexed so every worker builds the same latent mix
+    # without storing per-example state. Values beyond the configured schedule
+    # reuse the final entry, which makes resume/extension runs predictable.
     schedule = getattr(configs, "rho_schedule", DEFAULT_RHO_SCHEDULE)
     if not schedule:
         schedule = DEFAULT_RHO_SCHEDULE
@@ -57,6 +54,8 @@ def get_epoch_rho(epoch: int, configs) -> float:
 
 
 def get_epoch_lambda_hidden(epoch: int, configs) -> float:
+    # Keep the no-distillation ablation explicit in YAML. A disabled alignment
+    # flag wins over any lambda schedule values left in the config for reference.
     if not getattr(configs, "hidden_state_alignment", True):
         return 0.0
 
@@ -71,6 +70,8 @@ def split_rationale_into_sentences(rationale: str) -> list[str]:
     if not rationale:
         return []
 
+    # Keep sentence punctuation attached so tokenized teacher boundaries point
+    # to the same natural-language units that were visible in the original CoT.
     sentences = re.findall(r"[^.!?]+(?:[.!?]+|$)", rationale)
     return [sentence.strip() for sentence in sentences if sentence.strip()]
 
@@ -81,6 +82,8 @@ def group_steps_to_max(steps: list[str], max_steps: int) -> list[str]:
     if len(steps) <= max_steps:
         return steps
 
+    # Long rationales are compressed into ordered contiguous blocks. This keeps
+    # K bounded while preserving the causal prefix each latent step summarizes.
     grouped_steps = []
     start = 0
     for group_idx in range(max_steps):
@@ -94,6 +97,9 @@ def group_steps_to_max(steps: list[str], max_steps: int) -> list[str]:
 
 
 def get_dynamic_latent_counts(num_steps: int, rho: float) -> tuple[int, int]:
+    # Student inputs replace a prefix of the explicit CoT. The same count is
+    # skipped from labels/text because CE is only applied to unreplaced steps
+    # plus the final answer.
     if num_steps <= 0:
         return 0, 0
     n_latent_tokens = int(math.ceil(rho * num_steps))
@@ -104,38 +110,29 @@ def get_dynamic_latent_counts(num_steps: int, rho: float) -> tuple[int, int]:
 def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
 
     def tokenize_sample(sample, max_length=3400):
-        image = sample["image"]
         pixel_values = sample["pixel_values"]
         image_grid_thw = sample["image_grid_thw"]
-        
-        processed_question = sample["question"]
 
-        # Tokenize question
         question_tokenized = sample["input_ids"]
         logging.debug(f"step length: {len(sample["steps"])}")
-        # Tokenize steps
+
         steps_tokenized = [
             tokenizer.encode(s + "\n", add_special_tokens=False)
             for s in sample["steps"]
         ]
         sample["answer"] = str(sample["answer"])
-        # Tokenize answer
         answer_tokenized = tokenizer.encode(
             "Therefore, the answer is " + sample["answer"], add_special_tokens=False
         ) + [tokenizer.eos_token_id]
         
-        # Calculate total sequence length
         total_length = (
             len(question_tokenized)
             + sum(len(step) for step in steps_tokenized)
             + len(answer_tokenized)
         )
-        print("question length: ", len(question_tokenized))
-        # If total length exceeds max_length, truncate steps_tokenized
+
         if total_length > max_length:
-            # Calculate how much to reduce
             excess_length = total_length - max_length
-            # Reduce steps_tokenized
             new_steps_tokenized = []
             current_length = 0
             for step in steps_tokenized:
@@ -145,7 +142,7 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
                 else:
                     break
             steps_tokenized = new_steps_tokenized
-        # Build the final sample
+
         sample = {
             "question_tokenized": question_tokenized,
             "steps_tokenized": steps_tokenized,
@@ -158,7 +155,6 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
         return sample
 
     dataset = dataset.map(lambda example, idx: {"idx": idx}, with_indices=True)
-    data = dataset
 
     if torch.cuda.device_count() > 1:
         if dist.get_rank() == 0:
@@ -251,7 +247,8 @@ class MyCollator:
             if "position_ids" in features[0].keys()
             else None
         )
-        # we have to pad the labels and position_ids manually as we cannot rely on `tokenizer.pad`
+        # Tokenizer padding does not know about ignored LM labels or manually
+        # shifted position ids, so these two fields are padded separately.
 
         if labels is not None:
             max_label_length = max(len(l) for l in labels)
@@ -285,8 +282,6 @@ def get_cot_latent_dataset(
     no_special_marker=False,
     shuffle=False,
 ):
-
-    n_additional_tokens = 0 if no_special_marker else 2
 
     def process_dataset(sample):
         n_skip_steps, n_latent_tokens = get_dynamic_latent_counts(

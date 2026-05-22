@@ -1,25 +1,12 @@
 import torch
 import torch.distributed
-import torch.optim as optim
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from datetime import timedelta
 import deepspeed
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-from torch.optim import AdamW
 import shutil
 import numpy as np
-from torch.utils.data import Subset
-from collections import OrderedDict
-import re
-import wandb
 
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from datasets import load_dataset, disable_caching
@@ -29,8 +16,6 @@ import logging
 
 from qwen_ivtlr import IVTLR
 from dataset import (
-    get_dataset,
-    get_cot_latent_dataset,
     MyCollator,
     get_dynamic_latent_counts,
     get_epoch_lambda_hidden,
@@ -40,19 +25,16 @@ from dataset import (
 )
 
 from tqdm import tqdm
-from copy import copy
 import itertools
-import os, sys
+import os
 import yaml
-import json
 import gc
 import argparse
-import functools
 from utils import Config, set_seed
-import pdb
 from peft import LoraConfig, get_peft_model
 
-# LoRA
+# LoRA keeps the trainable surface small enough for the 2B Qwen-VL model while
+# still adapting the attention and MLP projections used during latent reasoning.
 lora_config = LoraConfig(
     task_type="CAUSAL_LM",
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -89,7 +71,9 @@ class LazyM3CoTCollator:
         self.max_length = max_length
         self.image_size = image_size
 
-        # Reuse the repo's original padding logic.
+        # The base collator has special handling that left-pads examples so the
+        # first latent token is aligned across the batch. That alignment matters
+        # because IVT-LR performs iterative partial forwards up to each latent.
         self.base_collator = MyCollator(
             tokenizer=tokenizer,
             latent_id=latent_id,
@@ -97,7 +81,6 @@ class LazyM3CoTCollator:
         )
 
     def _build_one_feature(self, sample):
-        # 1. Build Qwen-VL chat prompt with image.
         messages = [
             {
                 "role": "user",
@@ -124,8 +107,9 @@ class LazyM3CoTCollator:
 
         image_inputs, video_inputs = process_vision_info(messages)
 
-        # 2. Process only this example's image right now.
-        # This is the key fix: pixel_values are created lazily, not cached in HF Arrow.
+        # Image tensors are created lazily inside the collator instead of being
+        # stored in Arrow. This avoids serializing large pixel tensors in the HF
+        # dataset cache and keeps preprocessing lightweight.
         inputs = self.processor(
             text=[prompt],
             images=image_inputs,
@@ -136,7 +120,6 @@ class LazyM3CoTCollator:
 
         question_tokenized = inputs["input_ids"][0].tolist()
 
-        # 3. Tokenize CoT steps and answer.
         steps_tokenized = [
             self.tokenizer.encode(step + "\n", add_special_tokens=False)
             for step in sample["steps"]
@@ -151,7 +134,9 @@ class LazyM3CoTCollator:
             + [self.tokenizer.eos_token_id]
         )
 
-        # 4. Truncate reasoning steps if sequence is too long.
+        # Truncate entire rationale steps from the tail rather than slicing
+        # tokens mid-sentence. The remaining CoT boundaries are later used for
+        # both latent replacement and teacher alignment.
         total_length = (
             len(question_tokenized)
             + sum(len(step) for step in steps_tokenized)
@@ -175,7 +160,7 @@ class LazyM3CoTCollator:
 
             steps_tokenized = new_steps_tokenized
 
-        # 5. Replace the first ceil(rho * K) sentence steps with latent tokens.
+        # Replace the first ceil(rho * K) sentence steps with latent tokens.
         n_skip_steps, n_latent_tokens = get_dynamic_latent_counts(
             len(steps_tokenized),
             self.rho,
@@ -204,6 +189,9 @@ class LazyM3CoTCollator:
         }
 
         if self.lambda_hidden > 0 and n_latent_tokens > 0:
+            # Teacher inputs keep the full explicit CoT. The recorded positions
+            # are the final token of each replaced sentence block, which is the
+            # causal state the student latent step should approximate.
             teacher_tokens = (
                 question_tokenized
                 + list(itertools.chain.from_iterable(steps_tokenized))
@@ -231,28 +219,28 @@ class LazyM3CoTCollator:
     def __call__(self, features):
         processed_features = [self._build_one_feature(sample) for sample in features]
 
-        # 1. Remove image tensors before tokenizer padding.
         pixel_values_list = [f.pop("pixel_values") for f in processed_features]
         image_grid_thw_list = [f.pop("image_grid_thw") for f in processed_features]
         idx_list = [f.pop("idx") for f in processed_features]
-        has_teacher_alignment = "teacher_input_ids" in processed_features[0]
+        has_teacher_alignment = any("teacher_input_ids" in feature for feature in processed_features)
         if has_teacher_alignment:
-            teacher_input_ids_list = [f.pop("teacher_input_ids") for f in processed_features]
-            teacher_attention_mask_list = [f.pop("teacher_attention_mask") for f in processed_features]
-            teacher_position_ids_list = [f.pop("teacher_position_ids") for f in processed_features]
-            teacher_sentence_end_positions_list = [
-                f.pop("teacher_sentence_end_positions") for f in processed_features
-            ]
-            teacher_alignment_mask_list = [f.pop("teacher_alignment_mask") for f in processed_features]
+            teacher_input_ids_list = []
+            teacher_attention_mask_list = []
+            teacher_position_ids_list = []
+            teacher_sentence_end_positions_list = []
+            teacher_alignment_mask_list = []
+            for feature in processed_features:
+                teacher_input_ids_list.append(feature.pop("teacher_input_ids", [self.tokenizer.eos_token_id]))
+                teacher_attention_mask_list.append(feature.pop("teacher_attention_mask", [1]))
+                teacher_position_ids_list.append(feature.pop("teacher_position_ids", [0]))
+                teacher_sentence_end_positions_list.append(feature.pop("teacher_sentence_end_positions", []))
+                teacher_alignment_mask_list.append(feature.pop("teacher_alignment_mask", []))
 
-        # 2. Use original repo collator only for text fields.
         batch = self.base_collator(processed_features)
 
-        # 3. Manually attach image fields after text padding.
-        # Qwen2-VL expects pixel_values usually concatenated across examples.
+        # Qwen2-VL consumes visual features as a concatenated tensor plus a grid
+        # descriptor per sample, so these fields are padded separately from text.
         batch["pixel_values"] = torch.cat(pixel_values_list, dim=0)
-
-        # image_grid_thw should be [batch_size, 3]
         batch["image_grid_thw"] = torch.stack(image_grid_thw_list, dim=0)
 
         batch["idx"] = torch.tensor(idx_list, dtype=torch.long)
@@ -314,14 +302,12 @@ def main():
     )
     args = parser.parse_args()
 
-    # Initialize DeepSpeed
     deepspeed.init_distributed()
     local_rank = args.local_rank
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     torch.cuda.set_device(local_rank)
-    print("line 57")
-    # load the configuration file
+
     with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
 
@@ -348,30 +334,16 @@ def main():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    cur_ckpts = os.listdir(save_dir)
-
-
-    # check if the job is preempted and resumed.
-    # if len(cur_ckpts) > 0 and rank == 0:
-    #     raise ValueError(
-    #         f"Save directory {save_dir} is not empty! "
-    #     )
-
     if configs.resume != 0:
-        # by setting `resume`, we can skip a few epoches at the beginning.
         print(
             f"Loading from {configs.load_model_path} and skip the first {configs.resume} epochs"
         )
-        
-        
-        
-    print("start loading model")
 
+    print(f"Loading {model_name}")
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_name, device_map="cuda", torch_dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager"
     )
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=configs.lr)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, trust_remote_code=True)
     tokenizer.padding_side = "right"
     tokenizer.pad_token = tokenizer.eos_token
@@ -389,16 +361,14 @@ def main():
 
     model = get_peft_model(model, lora_config)
 
-    loaded = False
-
     model.resize_token_embeddings(len(tokenizer))
     embeddings = model.get_input_embeddings()
     target_id = tokenizer.convert_tokens_to_ids("<<")
-    # initialize the new token embeddings with a known token
-    # it helps stablize the training
+    # The latent marker tokens are newly added to the tokenizer. Initializing
+    # them from an existing textual token avoids starting those embeddings from
+    # random values before the first latent-reasoning epoch.
     for token_id in [latent_id, start_id, end_id]:
-        target_embedding = embeddings.weight.data[token_id]
-        embeddings.weight.data[token_id] = target_embedding
+        embeddings.weight.data[token_id] = embeddings.weight.data[target_id]
 
         lm_head = model.lm_head
         lm_head.weight.data[token_id] = lm_head.weight.data[target_id]
@@ -426,7 +396,6 @@ def main():
     model_engine, optimizer, _, _ = deepspeed.initialize(
         model=model,
         config=args.deepspeed_config,
-        # optimizer = optimizer,
         model_parameters=filter(lambda p: p.requires_grad, model.parameters())
     )
 
@@ -434,70 +403,9 @@ def main():
 
     dataset = load_dataset("LightChen2333/M3CoT")
 
-    # def process_example(example):
-    #     rationale = example["rationale"].replace("\n", " ").strip()
-    #     example["steps"] = rationale.split(". ")
-    #     if example["steps"][-1] == "":
-    #         example["steps"].pop()
-
-    #     if len(example["steps"]) > 3:
-    #         total_steps = len(example["steps"])
-    #         step_size = total_steps // 3
-    #         remainder = total_steps % 3
-
-    #         new_steps = []
-    #         start = 0
-
-    #         for i in range(3):
-    #             end = start + step_size + (1 if i < remainder else 0)
-    #             new_steps.append(". ".join(example["steps"][start:end]))
-    #             start = end
-
-    #         example["steps"] = new_steps
-
-
-    #     question = example["question"]
-    #     choices = example["choices"]
-        
-
-    #     choices_str = "[Options]:\n"+"\n".join([
-    #         f"({chr(65 + i)}).{{{choice.strip()}}}"
-    #         for i, choice in enumerate(choices)
-    #     ])
-    #     question = question
-    #     question_with_braces = f"{{{question.strip()}}}"
-    #     prefix_str = "Answer:"
-        
-    #     example["question"] = f"[Question]:{question_with_braces}\n{choices_str}\n{prefix_str}\n"
-        
-    #     del example["rationale"]
-    #     del example["choices"]
-
-    #     messages = [{
-    #         "role": "user",
-    #         "content": [
-    #             {"type": "image", "image": example["image"], "resized_height": 280, "resized_width": 280},
-    #             {"type": "text", "text": example["question"]}
-    #         ]
-    #     }]
-
-    #     example["question"] = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    #     image_inputs, video_inputs = process_vision_info(messages)
-    #     inputs = processor(
-    #         text=[example["question"]],
-    #         images=image_inputs,
-    #         videos=video_inputs,
-    #         padding=True,
-    #         return_tensors="pt"
-    #     )
-    #     inputs = {k: v.tolist() for k, v in inputs.items()}
-    #     example["input_ids"] = torch.tensor(inputs["input_ids"][0])
-    #     example["image_grid_thw"] = torch.tensor(inputs["image_grid_thw"]).squeeze(0)
-    #     example["pixel_values"] = torch.tensor(inputs["pixel_values"])
-
-    #     return example
-
     def process_example(example):
+        # M3CoT rationales are converted once to bounded sentence steps. The
+        # per-epoch collator decides how many of these steps become latents.
         steps = split_rationale_into_sentences(example["rationale"])
         example["steps"] = group_steps_to_max(
             steps,
@@ -523,34 +431,10 @@ def main():
             f"{prefix_str}\n"
         )
 
-        # Remove large/unneeded text fields.
         del example["rationale"]
         del example["choices"]
 
         return example
-    
-    # print("start dataset")
-
-    # def has_image(example):
-    #     return (
-    #         "image" in example and example["image"] is not None
-    #     )
-
-    # train_dataset = dataset["train"].filter(has_image)
-    # # train_dataset = train_dataset.map(process_example, num_proc=2)
-    # train_dataset = train_dataset.map(
-    #     process_example,
-    #     num_proc=2,
-    #     keep_in_memory=False,
-    #     load_from_cache_file=False,
-    #     desc="Processing M3CoT"
-    # )
-
-
-    # base_dataset_train = get_dataset(
-    #     train_dataset, tokenizer, processor, max_size=5000 if configs.debug else 100000000
-    # )
-    print("start dataset")
 
     def has_image(example):
         return "image" in example and example["image"] is not None
@@ -560,7 +444,6 @@ def main():
     if configs.debug:
         train_dataset = train_dataset.select(range(min(200, len(train_dataset))))
 
-    # Lightweight map only. No image tensor processing here.
     train_dataset = train_dataset.map(
         process_example,
         num_proc=1,
@@ -568,7 +451,6 @@ def main():
         desc="Formatting M3CoT text only",
     )
 
-    # Add stable indices. This is lightweight.
     train_dataset = train_dataset.map(
         lambda example, idx: {"idx": idx},
         with_indices=True,
@@ -579,21 +461,7 @@ def main():
 
     base_dataset_train = train_dataset
 
-    total_train_steps = 0
-
-    # if not configs.debug and rank == 0:
-    #     wandb_run = wandb.init(project=configs.project, name=configs.name)
-    #     wandb_run.config.update(configs, allow_val_change=True)
-    #     text_table = wandb.Table(columns=["step", "text"])
-
-    # else:
-    wandb_run = None
-
-
     best_acc = 0
-
-    # collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
-
 
     for epoch in range(configs.resume, configs.num_epochs):
 
@@ -602,26 +470,8 @@ def main():
 
         np.random.seed(epoch) 
 
-        # dataset_train = get_cot_latent_dataset(
-        #     scheduled_stage,
-        #     base_dataset_train,
-        #     configs,
-        #     start_id,
-        #     latent_id,
-        #     end_id,
-        #     no_special_marker=True,
-        #     shuffle=True,
-        # )
-
-        # train_dataloader = torch.utils.data.DataLoader(
-        #     dataset_train,
-        #     num_workers=1,
-        #     shuffle=False,
-        #     pin_memory=True,
-        #     batch_size=configs.batch_size_training,
-        #     collate_fn=collator,
-        #     sampler=DistributedSampler(dataset_train, shuffle=True),
-        # )
+        # Rebuild only the collator each epoch. It carries the current rho and
+        # lambda values, while image processing remains lazy at batch time.
         dataset_train = base_dataset_train
 
         collator = LazyM3CoTCollator(
@@ -657,28 +507,6 @@ def main():
             dynamic_ncols=True,
         )
         for step, batch in enumerate(train_dataloader):
-            print("start")
-            if step == 0 and wandb_run and rank == 0:
-                print("logging training data")
-                cur_bs = len(batch["input_ids"])
-                text_str = ""
-                for data_idx in range(cur_bs):
-                    for token_idx in range(len(batch["input_ids"][data_idx])):
-                        text_str += (
-                            str(batch["input_ids"][data_idx][token_idx].item())
-                            + " "
-                            + str(batch["labels"][data_idx][token_idx].item())
-                            + " "
-                            + tokenizer.decode(
-                                batch["input_ids"][data_idx][token_idx]
-                            )
-                            + "\n"
-                        )
-                    text_str += "====" * 10 + "\n"
-
-                # text_table.add_data(total_train_steps, text_str)
-
-            total_train_steps += 1
             batch = {
                 key: batch[key].to(rank) for key in batch.keys() if key != "idx"
             }
@@ -690,26 +518,13 @@ def main():
             print(f"loss: {loss}")
             model_engine.backward(loss)
             model_engine.step()
-            
-            if wandb_run and rank == 0:
-                log_dict = {
-                    "train/epoch": epoch + 1,
-                    "train/step": epoch * len(train_dataloader) + step,
-                    "train/loss": loss.detach().float(),
-                    "train/rho": rho,
-                    "train/lambda_hidden": lambda_hidden,
-                    "train/loss_ce": loss_ce,
-                    "train/loss_hidden": loss_hidden,
-                    # * configs.gradient_accumulation_steps,
-                }
-                wandb_run.log(log_dict)
-            # print("line432")
+
             pbar.set_description(
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
                 f"completed (loss: {round(float(loss.detach().float()), 4)}, "
+                f"loss_ce: {round(float(loss_ce), 4)}, "
                 f"loss_hidden: {round(float(loss_hidden), 4)}, rho: {rho}, lambda_h: {lambda_hidden})"
             )
-            print("finish")
         pbar.close()
         dist.barrier()
 

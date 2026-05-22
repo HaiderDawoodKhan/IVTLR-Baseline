@@ -4,7 +4,7 @@ name: qwen_IVTLR_sqa_no_hidden_distill
 model_name: Qwen/Qwen2-VL-2B-Instruct
 
 epochs_per_stage: 4
-max_latent_stage: 20
+max_latent_stage: 15
 pad_latent_to_max: True
 hidden_state_alignment: False
 disable_visual_insert: True

@@ -1,25 +1,12 @@
 import torch
 import torch.distributed
-import torch.optim as optim
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from datetime import timedelta
 import deepspeed
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-from torch.optim import AdamW
 import shutil
 import numpy as np
-from torch.utils.data import Subset
-from collections import OrderedDict
-import re
-import wandb
 
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from datasets import load_dataset, disable_caching
@@ -28,8 +15,6 @@ import logging
 
 from qwen_ivtlr import IVTLR
 from dataset import (
-    get_dataset,
-    get_cot_latent_dataset,
     MyCollator,
     get_dynamic_latent_counts,
     get_epoch_lambda_hidden,
@@ -39,19 +24,16 @@ from dataset import (
 )
 
 from tqdm import tqdm
-from copy import copy
 import itertools
-import os, sys
+import os
 import yaml
-import json
 import gc
 import argparse
-import functools
 from utils import Config, set_seed
-import pdb
 from peft import LoraConfig, get_peft_model
 
-# LoRA 配置
+# LoRA keeps the trainable surface small enough for the 2B Qwen-VL model while
+# still adapting the attention and MLP projections used during latent reasoning.
 lora_config = LoraConfig(
     task_type="CAUSAL_LM",
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -89,6 +71,8 @@ class LazyScienceQACollator:
         self.max_length = max_length
         self.image_size = image_size
 
+        # The base collator aligns the first latent token across a batch so the
+        # IVT-LR wrapper can run partial forwards up to the same latent boundary.
         self.base_collator = MyCollator(
             tokenizer=tokenizer,
             latent_id=latent_id,
@@ -132,6 +116,9 @@ class LazyScienceQACollator:
 
         question_tokenized = inputs["input_ids"][0].tolist()
 
+        # ScienceQA stores rationale text across lecture and solution fields.
+        # By this point those fields have already been merged into sentence
+        # steps; token spans remain intact for teacher-state alignment.
         steps_tokenized = [
             self.tokenizer.encode(step + "\n", add_special_tokens=False)
             for step in sample["steps"]
@@ -146,6 +133,8 @@ class LazyScienceQACollator:
             + [self.tokenizer.eos_token_id]
         )
 
+        # Drop full rationale steps if the prompt would exceed the Qwen context
+        # budget. Keeping whole steps preserves the K-to-sentence mapping.
         total_length = (
             len(question_tokenized)
             + sum(len(step) for step in steps_tokenized)
@@ -197,6 +186,8 @@ class LazyScienceQACollator:
         }
 
         if self.lambda_hidden > 0 and n_latent_tokens > 0:
+            # The teacher sequence keeps explicit CoT. Alignment positions point
+            # to the hidden state after each sentence block replaced by a latent.
             teacher_tokens = (
                 question_tokenized
                 + list(itertools.chain.from_iterable(steps_tokenized))
@@ -227,18 +218,24 @@ class LazyScienceQACollator:
         pixel_values_list = [f.pop("pixel_values") for f in processed_features]
         image_grid_thw_list = [f.pop("image_grid_thw") for f in processed_features]
         idx_list = [f.pop("idx") for f in processed_features]
-        has_teacher_alignment = "teacher_input_ids" in processed_features[0]
+        has_teacher_alignment = any("teacher_input_ids" in feature for feature in processed_features)
         if has_teacher_alignment:
-            teacher_input_ids_list = [f.pop("teacher_input_ids") for f in processed_features]
-            teacher_attention_mask_list = [f.pop("teacher_attention_mask") for f in processed_features]
-            teacher_position_ids_list = [f.pop("teacher_position_ids") for f in processed_features]
-            teacher_sentence_end_positions_list = [
-                f.pop("teacher_sentence_end_positions") for f in processed_features
-            ]
-            teacher_alignment_mask_list = [f.pop("teacher_alignment_mask") for f in processed_features]
+            teacher_input_ids_list = []
+            teacher_attention_mask_list = []
+            teacher_position_ids_list = []
+            teacher_sentence_end_positions_list = []
+            teacher_alignment_mask_list = []
+            for feature in processed_features:
+                teacher_input_ids_list.append(feature.pop("teacher_input_ids", [self.tokenizer.eos_token_id]))
+                teacher_attention_mask_list.append(feature.pop("teacher_attention_mask", [1]))
+                teacher_position_ids_list.append(feature.pop("teacher_position_ids", [0]))
+                teacher_sentence_end_positions_list.append(feature.pop("teacher_sentence_end_positions", []))
+                teacher_alignment_mask_list.append(feature.pop("teacher_alignment_mask", []))
 
         batch = self.base_collator(processed_features)
 
+        # Visual tensors use Qwen's own batching convention, so they are attached
+        # after text padding rather than passed through tokenizer padding.
         batch["pixel_values"] = torch.cat(pixel_values_list, dim=0)
         batch["image_grid_thw"] = torch.stack(image_grid_thw_list, dim=0)
         batch["idx"] = torch.tensor(idx_list, dtype=torch.long)
@@ -300,14 +297,12 @@ def main():
     )
     args = parser.parse_args()
 
-    # Initialize DeepSpeed
     deepspeed.init_distributed()
     local_rank = args.local_rank
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     torch.cuda.set_device(local_rank)
-    print("line 57")
-    # load the configuration file
+
     with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
 
@@ -334,23 +329,16 @@ def main():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    cur_ckpts = os.listdir(save_dir)
-
     if configs.resume != 0:
-        # by setting `resume`, we can skip a few epoches at the beginning.
         print(
             f"Loading from {configs.load_model_path} and skip the first {configs.resume} epochs"
         )
-        
-        
-        
-    print("start loading model")
-    # Todo:modify model and Tokenizer
+
+    print(f"Loading {model_name}")
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_name, device_map="cuda", torch_dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager"
     )
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=configs.lr)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, trust_remote_code=True)
     tokenizer.padding_side = "right"
     tokenizer.pad_token = tokenizer.eos_token
@@ -365,19 +353,16 @@ def main():
     image_token_id = tokenizer.convert_tokens_to_ids(processor.image_token)
     visual_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
     visual_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
-    print("line159")
     model = get_peft_model(model, lora_config)
-
-    loaded = False
 
     model.resize_token_embeddings(len(tokenizer))
     embeddings = model.get_input_embeddings()
     target_id = tokenizer.convert_tokens_to_ids("<<")
-    # initialize the new token embeddings with a known token
-    # it helps stablize the training
+    # The latent marker tokens are newly added to the tokenizer. Initializing
+    # them from an existing textual token avoids random embeddings dominating
+    # the first latent-reasoning epochs.
     for token_id in [latent_id, start_id, end_id]:
-        target_embedding = embeddings.weight.data[token_id]
-        embeddings.weight.data[token_id] = target_embedding
+        embeddings.weight.data[token_id] = embeddings.weight.data[target_id]
         
         lm_head = model.lm_head
         lm_head.weight.data[token_id] = lm_head.weight.data[target_id]
@@ -397,7 +382,6 @@ def main():
     )
 
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
-    # model = model.to(rank)
     model = model.to(local_rank)
 
     if configs.bf16:
@@ -406,7 +390,6 @@ def main():
     model_engine, optimizer, _, _ = deepspeed.initialize(
         model=model,
         config=args.deepspeed_config,
-        # optimizer = optimizer,
         model_parameters=filter(lambda p: p.requires_grad, model.parameters())
     )
 
@@ -463,45 +446,13 @@ def main():
         if "choices" in example:
             del example["choices"]
 
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": example["image"], "resized_height": 280, "resized_width": 280},
-                {"type": "text", "text": example["question"]}
-            ]
-        }]
-
-        # example["question"] = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        # image_inputs, video_inputs = process_vision_info(messages)
-        # inputs = processor(
-        #     text=[example["question"]],
-        #     images=image_inputs,
-        #     videos=video_inputs,
-        #     padding=True,
-        #     return_tensors="pt"
-        # )
-        # inputs = {k: v.tolist() for k, v in inputs.items()}
-        # example["input_ids"] = torch.tensor(inputs["input_ids"][0])
-        # example["image_grid_thw"] = torch.tensor(inputs["image_grid_thw"]).squeeze(0)
-        # example["pixel_values"] = torch.tensor(inputs["pixel_values"])
-
         return example
-    
-    print("start dataset")
 
     def has_image(example):
         return (
             "image" in example and example["image"] is not None
         )
 
-    # train_dataset = dataset["train"].filter(has_image)
-    # train_dataset = train_dataset.map(process_example, num_proc=2)
-
-
-    # base_dataset_train = get_dataset(
-    #     train_dataset, tokenizer, processor, max_size=5000 if configs.debug else 100000000
-    # )
-    
     train_dataset = dataset["train"].filter(has_image)
 
     if configs.debug:
@@ -524,23 +475,8 @@ def main():
 
     base_dataset_train = train_dataset
 
-
-    total_train_steps = 0
-
-    # if not configs.debug and rank == 0:
-    #     wandb_run = wandb.init(project=configs.project, name=configs.name)
-    #     wandb_run.config.update(configs, allow_val_change=True)
-    #     text_table = wandb.Table(columns=["step", "text"])
-
-    # else:
-    wandb_run = None
-
-
     best_acc = 0
 
-    # collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
-
-        
     for epoch in range(configs.resume, configs.num_epochs):
 
         rho = get_epoch_rho(epoch, configs)
@@ -548,28 +484,8 @@ def main():
 
         np.random.seed(epoch) 
 
-        # dataset_train = get_cot_latent_dataset(
-        #     scheduled_stage,
-        #     base_dataset_train,
-        #     configs,
-        #     start_id,
-        #     latent_id,
-        #     end_id,
-        #     no_special_marker=getattr(configs, "cot", False)
-        #     or getattr(configs, "no_cot", False)
-        #     or getattr(configs, "no_thoughts", False),
-        #     shuffle=True,
-        # )
-
-        # train_dataloader = torch.utils.data.DataLoader(
-        #     dataset_train,
-        #     num_workers=1,
-        #     shuffle=False,
-        #     pin_memory=True,
-        #     batch_size=configs.batch_size_training,
-        #     collate_fn=collator,
-        #     sampler=DistributedSampler(dataset_train, shuffle=True),
-        # )
+        # Rebuild only the collator each epoch. It carries the current rho and
+        # lambda values, while image processing remains lazy at batch time.
         dataset_train = base_dataset_train
 
         collator = LazyScienceQACollator(
@@ -605,32 +521,6 @@ def main():
             dynamic_ncols=True,
         )
         for step, batch in enumerate(train_dataloader):
-            print("start")
-            # pdb.set_trace()
-            if step == 0 and wandb_run and rank == 0:
-                print("logging training data")
-                cur_bs = len(batch["input_ids"])
-                text_str = ""
-                for data_idx in range(cur_bs):
-                    for token_idx in range(len(batch["input_ids"][data_idx])):
-                        text_str += (
-                            str(batch["input_ids"][data_idx][token_idx].item())
-                            + " "
-                            + str(batch["labels"][data_idx][token_idx].item())
-                            + " "
-                            + tokenizer.decode(
-                                batch["input_ids"][data_idx][token_idx]
-                            )
-                            + "\n"
-                        )
-                    text_str += "====" * 10 + "\n"
-
-                # text_table.add_data(total_train_steps, text_str)
-
-            total_train_steps += 1
-            # batch = {
-            #     key: batch[key].to(rank) for key in batch.keys() if key != "idx"
-            # }
             batch = {
                 key: batch[key].to(local_rank) for key in batch.keys() if key != "idx"
             }
@@ -642,31 +532,16 @@ def main():
             print(f"loss: {loss}")
             model_engine.backward(loss)
             model_engine.step()
-            
-            if wandb_run and rank == 0:
-                log_dict = {
-                    "train/epoch": epoch + 1,
-                    "train/step": epoch * len(train_dataloader) + step,
-                    "train/loss": loss.detach().float(),
-                    "train/rho": rho,
-                    "train/lambda_hidden": lambda_hidden,
-                    "train/loss_ce": loss_ce,
-                    "train/loss_hidden": loss_hidden,
-                    # * configs.gradient_accumulation_steps,
-                }
-                wandb_run.log(log_dict)
-            # print("line432")
+
             pbar.set_description(
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
                 f"completed (loss: {round(float(loss.detach().float()), 4)}, "
+                f"loss_ce: {round(float(loss_ce), 4)}, "
                 f"loss_hidden: {round(float(loss_hidden), 4)}, rho: {rho}, lambda_h: {lambda_hidden})"
             )
-            print("finish")
         pbar.close()
         dist.barrier()
 
-
-        # save start
         if (not configs.debug) and (epoch + 1) % 4 == 0:
             
             epoch_save_dir = os.path.join(save_dir, f"epoch_{epoch+1}_checkpoint")

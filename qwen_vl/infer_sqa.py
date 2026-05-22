@@ -14,7 +14,6 @@ import time
 from datetime import timedelta
 import argparse
 import yaml
-import pdb
 import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"

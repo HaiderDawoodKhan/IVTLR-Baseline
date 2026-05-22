@@ -195,7 +195,7 @@ def main():
     if configs.resume != 0:
         print(f"Skipping the first {configs.resume} epochs; checkpoint loading is unchanged from IVTLR scripts.")
 
-    print("start loading baseline model")
+    print(f"Loading baseline model {model_name}")
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_name,
         device_map="cuda",
@@ -231,6 +231,8 @@ def main():
         return "image" in example and example["image"] is not None
 
     def process_example(example):
+        # Baseline training keeps explicit textual rationale, but keeps the same
+        # coarse three-step grouping used by the original baseline comparison.
         rationale = example["rationale"].replace("\n", " ").strip()
         example["steps"] = rationale.split(". ")
         if example["steps"] and example["steps"][-1] == "":
@@ -258,7 +260,6 @@ def main():
         del example["choices"]
         return example
 
-    print("start dataset")
     train_dataset = dataset["train"].filter(has_image)
     if configs.debug:
         train_dataset = train_dataset.select(range(min(200, len(train_dataset))))
@@ -277,7 +278,6 @@ def main():
         desc="Adding indices",
     )
 
-    total_train_steps = 0
     best_acc = 0
 
     for epoch in range(configs.resume, configs.num_epochs):
@@ -309,7 +309,6 @@ def main():
         )
 
         for step, batch in enumerate(train_dataloader):
-            total_train_steps += 1
             batch = {key: batch[key].to(local_rank) for key in batch.keys() if key != "idx"}
             outputs = model_engine(**batch)
             loss = outputs.loss
