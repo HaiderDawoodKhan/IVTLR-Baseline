@@ -209,3 +209,5 @@ __marimo__/
 qwen_vl/wandb
 qwen_vl/output
 *.log
+
+qwen_vl/outputs_dynamic_ivtlr/
