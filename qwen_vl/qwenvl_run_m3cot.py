@@ -17,9 +17,12 @@ import logging
 from qwen_ivtlr import IVTLR
 from dataset import (
     MyCollator,
-    get_dynamic_latent_counts,
+    build_latent_replacement_sequence,
+    filter_dataset_for_curriculum,
     get_epoch_lambda_hidden,
-    get_epoch_rho,
+    get_epoch_curriculum_state,
+    get_masked_step_indices,
+    get_teacher_sentence_end_positions,
     group_steps_to_max,
     split_rationale_into_sentences,
 )
@@ -50,7 +53,7 @@ class LazyM3CoTCollator:
         tokenizer,
         processor,
         configs,
-        rho,
+        curriculum_state,
         lambda_hidden,
         latent_id,
         start_id,
@@ -62,7 +65,7 @@ class LazyM3CoTCollator:
         self.tokenizer = tokenizer
         self.processor = processor
         self.configs = configs
-        self.rho = rho
+        self.curriculum_state = curriculum_state
         self.lambda_hidden = lambda_hidden
         self.latent_id = latent_id
         self.start_id = start_id
@@ -160,22 +163,20 @@ class LazyM3CoTCollator:
 
             steps_tokenized = new_steps_tokenized
 
-        # Replace the first ceil(rho * K) sentence steps with latent tokens.
-        n_skip_steps, n_latent_tokens = get_dynamic_latent_counts(
+        masked_step_indices = get_masked_step_indices(
             len(steps_tokenized),
-            self.rho,
+            self.curriculum_state,
+            int(sample["idx"]),
+            getattr(self.configs, "seed", 0),
         )
-
-        tokens = (
-            question_tokenized
-            + [self.latent_id] * n_latent_tokens
-            + list(itertools.chain.from_iterable(steps_tokenized[n_skip_steps:]))
-            + answer_tokenized
-        )
-
-        labels = (
-            [-100] * (len(question_tokenized) + n_latent_tokens)
-            + tokens[n_latent_tokens + len(question_tokenized):]
+        n_latent_tokens = len(masked_step_indices)
+        tokens, labels = build_latent_replacement_sequence(
+            question_tokenized,
+            steps_tokenized,
+            answer_tokenized,
+            self.latent_id,
+            masked_step_indices,
+            self.label_pad_token_id,
         )
 
         feature = {
@@ -197,12 +198,11 @@ class LazyM3CoTCollator:
                 + list(itertools.chain.from_iterable(steps_tokenized))
                 + answer_tokenized
             )
-            teacher_sentence_end_positions = []
-            cursor = len(question_tokenized)
-            for step_idx, step_tokens in enumerate(steps_tokenized):
-                cursor += len(step_tokens)
-                if step_idx < n_latent_tokens:
-                    teacher_sentence_end_positions.append(cursor - 1)
+            teacher_sentence_end_positions = get_teacher_sentence_end_positions(
+                len(question_tokenized),
+                steps_tokenized,
+                masked_step_indices,
+            )
 
             feature.update(
                 {
@@ -465,20 +465,20 @@ def main():
 
     for epoch in range(configs.resume, configs.num_epochs):
 
-        rho = get_epoch_rho(epoch, configs)
+        curriculum_state = get_epoch_curriculum_state(epoch, configs)
         lambda_hidden = get_epoch_lambda_hidden(epoch, configs)
 
         np.random.seed(epoch) 
 
-        # Rebuild only the collator each epoch. It carries the current rho and
-        # lambda values, while image processing remains lazy at batch time.
-        dataset_train = base_dataset_train
+        # Rebuild only the collator each epoch. It carries the current curriculum
+        # and lambda values, while image processing remains lazy at batch time.
+        dataset_train = filter_dataset_for_curriculum(base_dataset_train, curriculum_state)
 
         collator = LazyM3CoTCollator(
             tokenizer=tokenizer,
             processor=processor,
             configs=configs,
-            rho=rho,
+            curriculum_state=curriculum_state,
             lambda_hidden=lambda_hidden,
             latent_id=latent_id,
             start_id=start_id,
@@ -523,7 +523,9 @@ def main():
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
                 f"completed (loss: {round(float(loss.detach().float()), 4)}, "
                 f"loss_ce: {round(float(loss_ce), 4)}, "
-                f"loss_hidden: {round(float(loss_hidden), 4)}, rho: {rho}, lambda_h: {lambda_hidden})"
+                f"loss_hidden: {round(float(loss_hidden), 4)}, "
+                f"mask_count: {curriculum_state.mask_count}, mask_mode: {curriculum_state.mask_mode}, "
+                f"rho: {curriculum_state.rho}, lambda_h: {lambda_hidden})"
             )
         pbar.close()
         dist.barrier()

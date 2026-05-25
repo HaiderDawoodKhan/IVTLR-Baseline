@@ -26,8 +26,9 @@ DEFAULT_RHO_SCHEDULE = (
     0.4, 0.4,
     0.5, 0.6,
     0.7, 0.8,
-    0.9,
-    1.0, 1.0, 1.0, 1.0, 1.0,
+    0.9, 1.0, 
+    1.0, 1.0, 
+    1.0, 1.0,
 )
 DEFAULT_LAMBDA_HIDDEN_SCHEDULE = (
     0.0, 0.0,
@@ -37,9 +38,34 @@ DEFAULT_LAMBDA_HIDDEN_SCHEDULE = (
     0.02, 0.02,
     0.03, 0.03,
     0.02, 0.015,
-    0.01,
-    0.005, 0.005, 0.005, 0.005, 0.005,
+    0.01, 0.005, 
+    0.005, 0.005, 
+    0.005, 0.005,
 )
+DEFAULT_FIXED_MASK_SCHEDULE = (
+    0, 0,
+    1, 1,
+    2, 2,
+    3, 3,
+    4, 4,
+    5, 5,
+    6, 6,
+    7, 7,
+    8, 8, 
+    8, 8,
+)
+
+
+@dataclass(frozen=True)
+class CurriculumState:
+    epoch: int
+    mask_mode: str
+    rho: Optional[float]
+    mask_count: Optional[int]
+
+    @property
+    def uses_fixed_mask(self) -> bool:
+        return self.rho is None
 
 
 def get_epoch_rho(epoch: int, configs) -> float:
@@ -51,6 +77,55 @@ def get_epoch_rho(epoch: int, configs) -> float:
         schedule = DEFAULT_RHO_SCHEDULE
     rho = float(schedule[min(epoch, len(schedule) - 1)])
     return max(0.0, min(1.0, rho))
+
+
+def get_fixed_mask_count(epoch: int, configs) -> int:
+    schedule = getattr(configs, "fixed_mask_schedule", DEFAULT_FIXED_MASK_SCHEDULE)
+    if not schedule:
+        schedule = DEFAULT_FIXED_MASK_SCHEDULE
+    mask_count = int(schedule[min(epoch, len(schedule) - 1)])
+    max_steps = int(getattr(configs, "fixed_mask_max_steps", 8))
+    return max(0, min(mask_count, max_steps))
+
+
+def _reference_mask_count_for_epoch(epoch: int, configs) -> int:
+    max_steps = int(getattr(configs, "fixed_mask_max_steps", 8))
+    if getattr(configs, "fixed_mask_step_curriculum", False):
+        return get_fixed_mask_count(epoch, configs)
+    return get_dynamic_latent_counts(max_steps, get_epoch_rho(epoch, configs))[1]
+
+
+def get_epoch_mask_mode(epoch: int, configs) -> str:
+    if not getattr(configs, "prefix_span", False):
+        return "prefix"
+
+    if _reference_mask_count_for_epoch(epoch, configs) == 0:
+        return "prefix"
+
+    if epoch <= 0:
+        return "prefix"
+
+    current_count = _reference_mask_count_for_epoch(epoch, configs)
+    previous_count = _reference_mask_count_for_epoch(epoch - 1, configs)
+    return "span" if current_count == previous_count else "prefix"
+
+
+def get_epoch_curriculum_state(epoch: int, configs) -> CurriculumState:
+    if getattr(configs, "fixed_mask_step_curriculum", False):
+        return CurriculumState(
+            epoch=epoch,
+            mask_mode=get_epoch_mask_mode(epoch, configs),
+            rho=None,
+            mask_count=get_fixed_mask_count(epoch, configs),
+        )
+
+    rho = get_epoch_rho(epoch, configs)
+    return CurriculumState(
+        epoch=epoch,
+        mask_mode=get_epoch_mask_mode(epoch, configs),
+        rho=rho,
+        mask_count=None,
+    )
 
 
 def get_epoch_lambda_hidden(epoch: int, configs) -> float:
@@ -107,6 +182,110 @@ def get_dynamic_latent_counts(num_steps: int, rho: float) -> tuple[int, int]:
     return n_latent_tokens, n_latent_tokens
 
 
+def sample_span_start(num_steps: int, mask_count: int, epoch: int, sample_idx: int, seed: int) -> int:
+    valid_starts = num_steps - mask_count + 1
+    if mask_count <= 0 or valid_starts <= 1:
+        return 0
+    value = (
+        int(seed) * 1_000_003
+        + int(epoch) * 97_003
+        + int(sample_idx) * 1_009
+        + int(mask_count) * 101
+        + int(num_steps)
+    )
+    return value % valid_starts
+
+
+def get_masked_step_indices(
+    num_steps: int,
+    curriculum_state: CurriculumState,
+    sample_idx: int,
+    seed: int,
+) -> list[int]:
+    if num_steps <= 0:
+        return []
+
+    if curriculum_state.uses_fixed_mask:
+        mask_count = int(curriculum_state.mask_count or 0)
+    else:
+        mask_count = get_dynamic_latent_counts(num_steps, float(curriculum_state.rho or 0.0))[1]
+
+    mask_count = max(0, min(num_steps, mask_count))
+    if mask_count == 0:
+        return []
+
+    if curriculum_state.mask_mode == "span":
+        start = sample_span_start(
+            num_steps,
+            mask_count,
+            curriculum_state.epoch,
+            sample_idx,
+            seed,
+        )
+    else:
+        start = 0
+
+    return list(range(start, start + mask_count))
+
+
+def build_latent_replacement_sequence(
+    question_tokenized: list[int],
+    steps_tokenized: list[list[int]],
+    answer_tokenized: list[int],
+    latent_id: int,
+    masked_step_indices: list[int],
+    label_pad_token_id: int = -100,
+) -> tuple[list[int], list[int]]:
+    masked_steps = set(masked_step_indices)
+    tokens = list(question_tokenized)
+    labels = [label_pad_token_id] * len(question_tokenized)
+
+    for step_idx, step_tokens in enumerate(steps_tokenized):
+        if step_idx in masked_steps:
+            tokens.append(latent_id)
+            labels.append(label_pad_token_id)
+        else:
+            tokens.extend(step_tokens)
+            labels.extend(step_tokens)
+
+    tokens.extend(answer_tokenized)
+    labels.extend(answer_tokenized)
+    return tokens, labels
+
+
+def get_teacher_sentence_end_positions(
+    question_length: int,
+    steps_tokenized: list[list[int]],
+    masked_step_indices: list[int],
+) -> list[int]:
+    masked_steps = set(masked_step_indices)
+    teacher_sentence_end_positions = []
+    cursor = question_length
+    for step_idx, step_tokens in enumerate(steps_tokenized):
+        cursor += len(step_tokens)
+        if step_idx in masked_steps:
+            teacher_sentence_end_positions.append(cursor - 1)
+    return teacher_sentence_end_positions
+
+
+def should_keep_for_curriculum(sample, curriculum_state: CurriculumState) -> bool:
+    if not curriculum_state.uses_fixed_mask:
+        return True
+    mask_count = int(curriculum_state.mask_count or 0)
+    return mask_count <= 0 or len(sample["steps"]) >= mask_count
+
+
+def filter_dataset_for_curriculum(base_dataset, curriculum_state: CurriculumState):
+    if not curriculum_state.uses_fixed_mask or int(curriculum_state.mask_count or 0) <= 0:
+        return base_dataset
+    return base_dataset.filter(
+        lambda sample: should_keep_for_curriculum(sample, curriculum_state),
+        num_proc=1,
+        load_from_cache_file=False,
+        desc=f"Filtering examples for {curriculum_state.mask_count} masked steps",
+    )
+
+
 def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
 
     def tokenize_sample(sample, max_length=3400):
@@ -114,7 +293,7 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
         image_grid_thw = sample["image_grid_thw"]
 
         question_tokenized = sample["input_ids"]
-        logging.debug(f"step length: {len(sample["steps"])}")
+        logging.debug(f"step length: {len(sample['steps'])}")
 
         steps_tokenized = [
             tokenizer.encode(s + "\n", add_special_tokens=False)

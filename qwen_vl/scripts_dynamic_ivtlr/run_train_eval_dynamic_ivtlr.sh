@@ -11,6 +11,10 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
 OUTPUT_ROOT="outputs_dynamic_ivtlr"
+GENERATED_CONFIG_DIR="args/generated_curriculum"
+BASE_M3COT_8_STEP_CONFIG="args/qwen_m3cot_no_hidden_distill_8_steps.yaml"
+M3COT_RHO_SCHEDULE='[0.0, 0.0, 0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.5, 0.6, 0.6, 0.7, 0.7, 0.8, 0.8, 1.0, 1.0, 1.0, 1.0]'
+FIXED_MASK_SCHEDULE='[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 8, 8]'
 
 run_deepspeed() {
   local script="$1"
@@ -18,6 +22,41 @@ run_deepspeed() {
   local log_file="$3"
 
   deepspeed --master_port "$MASTER_PORT" "$script" "$config_file" --deepspeed --deepspeed_config ds_config.json 2>&1 | tee "$log_file"
+}
+
+create_curriculum_config() {
+  local base_config="$1"
+  local output_config="$2"
+  local run_name="$3"
+  local prefix_span="$4"
+  local fixed_mask="$5"
+
+  mkdir -p "$GENERATED_CONFIG_DIR"
+  python - "$base_config" "$output_config" "$run_name" "$prefix_span" "$fixed_mask" "$M3COT_RHO_SCHEDULE" "$FIXED_MASK_SCHEDULE" <<'PY'
+import ast
+import sys
+import yaml
+
+base_config, output_config, run_name, prefix_span, fixed_mask, rho_schedule, fixed_mask_schedule = sys.argv[1:]
+
+with open(base_config) as f:
+    config = yaml.safe_load(f)
+
+config.update(
+    {
+        "name": run_name,
+        "prefix_span": prefix_span == "true",
+        "fixed_mask_step_curriculum": fixed_mask == "true",
+        "fixed_mask_max_steps": 8,
+        "fixed_mask_schedule": ast.literal_eval(fixed_mask_schedule),
+        "rho_schedule": ast.literal_eval(rho_schedule),
+        "num_epochs": 20,
+    }
+)
+
+with open(output_config, "w") as f:
+    yaml.safe_dump(config, f, sort_keys=False)
+PY
 }
 
 find_latest_checkpoint() {
@@ -63,10 +102,55 @@ eval_sqa() {
 
 # Finish all M3CoT variants before starting ScienceQA.
 # run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
-eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
+# eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
 
 # run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
 # eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "latest_dynamic_no_hidden_distill_8_steps"
+
+create_curriculum_config \
+  "$BASE_M3COT_8_STEP_CONFIG" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
+  "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span" \
+  "true" \
+  "false"
+run_deepspeed \
+  "qwenvl_run_m3cot.py" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
+  "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_prefix_span.log"
+eval_m3cot \
+  "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
+  "latest_dynamic_no_hidden_distill_8_steps_prefix_span"
+
+create_curriculum_config \
+  "$BASE_M3COT_8_STEP_CONFIG" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
+  "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_fixed_mask" \
+  "false" \
+  "true"
+run_deepspeed \
+  "qwenvl_run_m3cot.py" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
+  "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_fixed_mask.log"
+eval_m3cot \
+  "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_fixed_mask" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
+  "latest_dynamic_no_hidden_distill_8_steps_fixed_mask"
+
+create_curriculum_config \
+  "$BASE_M3COT_8_STEP_CONFIG" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
+  "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask" \
+  "true" \
+  "true"
+run_deepspeed \
+  "qwenvl_run_m3cot.py" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
+  "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_prefix_span_fixed_mask.log"
+eval_m3cot \
+  "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask" \
+  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
+  "latest_dynamic_no_hidden_distill_8_steps_prefix_span_fixed_mask"
 
 # run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
 # eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
