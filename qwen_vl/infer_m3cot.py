@@ -17,7 +17,7 @@ import yaml
 import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-INFERENCE_LATENT_STEPS = 10
+INFERENCE_LATENT_STEPS = 8
 
 def load_inference_model(
     checkpoint_path,

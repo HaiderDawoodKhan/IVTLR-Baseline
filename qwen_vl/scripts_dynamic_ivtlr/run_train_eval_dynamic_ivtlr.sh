@@ -62,11 +62,11 @@ eval_sqa() {
 }
 
 # Finish all M3CoT variants before starting ScienceQA.
-run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
+# run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
 eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
 
-run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
-eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "latest_dynamic_no_hidden_distill_8_steps"
+# run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
+# eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "latest_dynamic_no_hidden_distill_8_steps"
 
 # run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
 # eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
