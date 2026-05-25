@@ -10,7 +10,7 @@ export MASTER_PORT="${MASTER_PORT:-29501}"
 export PYTHONUNBUFFERED=1
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
-OUTPUT_ROOT="outuputs_dynamic_ivtlr"
+OUTPUT_ROOT="outputs_dynamic_ivtlr"
 
 run_deepspeed() {
   local script="$1"
@@ -65,11 +65,14 @@ eval_sqa() {
 run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
 eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill" "args/qwen_m3cot_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
 
-run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
-eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
+run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
+eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "latest_dynamic_no_hidden_distill_8_steps"
 
-run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa.yaml" "qwenvl_scienceqa_dynamic_hidden_distill.log"
-eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa" "args/qwen_sqa.yaml" "latest_dynamic_hidden_distill"
+# run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
+# eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"
 
-run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa_no_hidden_distill.yaml" "qwenvl_scienceqa_dynamic_no_hidden_distill.log"
-eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa_no_hidden_distill" "args/qwen_sqa_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
+# run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa.yaml" "qwenvl_scienceqa_dynamic_hidden_distill.log"
+# eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa" "args/qwen_sqa.yaml" "latest_dynamic_hidden_distill"
+
+# run_deepspeed "qwenvl_run_sqa.py" "args/qwen_sqa_no_hidden_distill.yaml" "qwenvl_scienceqa_dynamic_no_hidden_distill.log"
+# eval_sqa "$OUTPUT_ROOT/qwen_IVTLR_sqa_no_hidden_distill" "args/qwen_sqa_no_hidden_distill.yaml" "latest_dynamic_no_hidden_distill"
