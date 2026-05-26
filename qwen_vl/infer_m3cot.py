@@ -101,6 +101,12 @@ parser.add_argument("--config", default="args/qwen_m3cot.yaml", help="Path to co
 parser.add_argument("--model_name", default=None, help="Override model name (e.g., Qwen/Qwen2-VL-2B-Instruct)")
 parser.add_argument("--run_tag", default=None, help="Optional tag for per-run output subfolder (e.g., epoch_4)")
 parser.add_argument(
+    "--latent_steps",
+    type=int,
+    default=INFERENCE_LATENT_STEPS,
+    help="Number of latent steps to append during inference",
+)
+parser.add_argument(
     "--disable_visual_insert",
     action="store_true",
     help="Disable top-k visual token insertion during latent reasoning",
@@ -226,8 +232,8 @@ def evaluate_and_save(eval_dataset, model, processor):
                 ]
             }]
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            if not args.no_reasoning:
-                text = text + ("<|latent|>" * INFERENCE_LATENT_STEPS)
+            if not args.no_reasoning and args.latent_steps > 0:
+                text = text + ("<|latent|>" * args.latent_steps)
             image_inputs, video_inputs = process_vision_info(messages)
             inputs = processor(
                 text=[text],

@@ -530,7 +530,7 @@ def main():
         pbar.close()
         dist.barrier()
 
-        if (not configs.debug) and (epoch + 1) % 4 == 0:
+        if (not configs.debug) and (epoch + 1) % 5 == 0:
             
             epoch_save_dir = os.path.join(save_dir, f"epoch_{epoch+1}_checkpoint")
 
