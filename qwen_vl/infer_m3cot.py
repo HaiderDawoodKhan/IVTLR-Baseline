@@ -6,6 +6,7 @@ import deepspeed
 from peft import LoraConfig,get_peft_model
 from qwen_vl_utils import process_vision_info
 from datasets import load_dataset
+from dataset import group_steps_to_max, split_rationale_into_sentences
 import re
 import logging
 import json
@@ -18,6 +19,7 @@ import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 INFERENCE_LATENT_STEPS = 8
+MAX_DYNAMIC_LATENT_STEPS = 8
 
 def load_inference_model(
     checkpoint_path,
@@ -105,6 +107,11 @@ parser.add_argument(
     type=int,
     default=INFERENCE_LATENT_STEPS,
     help="Number of latent steps to append during inference",
+)
+parser.add_argument(
+    "--dynamic_latent_steps",
+    action="store_true",
+    help="Use per-example latent steps derived from the CoT rationale (capped at 8)",
 )
 parser.add_argument(
     "--disable_visual_insert",
@@ -198,11 +205,15 @@ def format_prompt(example):
 
 def process_func(example):
     prompt, rationale, answer, image = format_prompt(example)
+    steps = split_rationale_into_sentences(rationale)
+    steps = group_steps_to_max(steps, MAX_DYNAMIC_LATENT_STEPS)
+    latent_steps = len(steps)
 
     return {
         "question_raw": prompt,
         "image_raw": image,
         "gt_answer": answer,
+        "latent_steps": latent_steps,
         "id": example["id"],
         "choices": example["choices"],
         "domain": example["domain"],
@@ -232,8 +243,12 @@ def evaluate_and_save(eval_dataset, model, processor):
                 ]
             }]
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            if not args.no_reasoning and args.latent_steps > 0:
-                text = text + ("<|latent|>" * args.latent_steps)
+            latent_steps = args.latent_steps
+            if args.dynamic_latent_steps:
+                latent_steps = int(ex.get("latent_steps", 0))
+            latent_steps = max(0, min(latent_steps, MAX_DYNAMIC_LATENT_STEPS))
+            if not args.no_reasoning and latent_steps > 0:
+                text = text + ("<|latent|>" * latent_steps)
             image_inputs, video_inputs = process_vision_info(messages)
             inputs = processor(
                 text=[text],
