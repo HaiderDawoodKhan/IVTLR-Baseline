@@ -62,6 +62,7 @@ class CurriculumState:
     mask_mode: str
     rho: Optional[float]
     mask_count: Optional[int]
+    train_all_samples: bool = False
 
     @property
     def uses_fixed_mask(self) -> bool:
@@ -86,6 +87,25 @@ def get_fixed_mask_count(epoch: int, configs) -> int:
     mask_count = int(schedule[min(epoch, len(schedule) - 1)])
     max_steps = int(getattr(configs, "fixed_mask_max_steps", 8))
     return max(0, min(mask_count, max_steps))
+
+
+def should_train_all_samples_fixed_epoch(epoch: int, configs) -> bool:
+    schedule = getattr(configs, "fixed_mask_schedule", DEFAULT_FIXED_MASK_SCHEDULE)
+    if not schedule:
+        schedule = DEFAULT_FIXED_MASK_SCHEDULE
+
+    max_steps = int(getattr(configs, "fixed_mask_max_steps", 8))
+    clamped_schedule = [max(0, min(int(mask_count), max_steps)) for mask_count in schedule]
+    schedule_idx = min(epoch, len(clamped_schedule) - 1)
+
+    if clamped_schedule[schedule_idx] != max_steps:
+        return False
+
+    max_step_epochs = [
+        idx for idx, mask_count in enumerate(clamped_schedule)
+        if mask_count == max_steps
+    ]
+    return schedule_idx in max_step_epochs[-2:]
 
 
 def _reference_mask_count_for_epoch(epoch: int, configs) -> int:
@@ -117,6 +137,7 @@ def get_epoch_curriculum_state(epoch: int, configs) -> CurriculumState:
             mask_mode=get_epoch_mask_mode(epoch, configs),
             rho=None,
             mask_count=get_fixed_mask_count(epoch, configs),
+            train_all_samples=should_train_all_samples_fixed_epoch(epoch, configs),
         )
 
     rho = get_epoch_rho(epoch, configs)
@@ -271,12 +292,18 @@ def get_teacher_sentence_end_positions(
 def should_keep_for_curriculum(sample, curriculum_state: CurriculumState) -> bool:
     if not curriculum_state.uses_fixed_mask:
         return True
+    if curriculum_state.train_all_samples:
+        return True
     mask_count = int(curriculum_state.mask_count or 0)
     return mask_count <= 0 or len(sample["steps"]) >= mask_count
 
 
 def filter_dataset_for_curriculum(base_dataset, curriculum_state: CurriculumState):
-    if not curriculum_state.uses_fixed_mask or int(curriculum_state.mask_count or 0) <= 0:
+    if (
+        not curriculum_state.uses_fixed_mask
+        or curriculum_state.train_all_samples
+        or int(curriculum_state.mask_count or 0) <= 0
+    ):
         return base_dataset
     return base_dataset.filter(
         lambda sample: should_keep_for_curriculum(sample, curriculum_state),
