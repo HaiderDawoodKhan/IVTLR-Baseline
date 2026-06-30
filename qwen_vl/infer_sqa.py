@@ -17,7 +17,8 @@ import yaml
 import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-INFERENCE_LATENT_STEPS = 10
+INFERENCE_LATENT_STEPS = 8
+MAX_DYNAMIC_LATENT_STEPS = 8
 
 def load_inference_model(
     checkpoint_path,
@@ -100,6 +101,22 @@ parser.add_argument("--checkpoint", required=True, help="Path to .pth checkpoint
 parser.add_argument("--config", default="args/qwen_sqa.yaml", help="Path to config YAML")
 parser.add_argument("--model_name", default=None, help="Override model name (e.g., Qwen/Qwen2-VL-2B-Instruct)")
 parser.add_argument("--run_tag", default=None, help="Optional tag for per-run output subfolder (e.g., epoch_4)")
+parser.add_argument(
+    "--latent_steps",
+    type=int,
+    default=INFERENCE_LATENT_STEPS,
+    help="Number of latent steps to append during inference",
+)
+parser.add_argument(
+    "--dynamic_latent_steps",
+    action="store_true",
+    help="Use per-example latent steps derived from the CoT rationale (capped at 8)",
+)
+parser.add_argument(
+    "--use_validation_set",
+    action="store_true",
+    help="Use validation set for inference",
+)
 parser.add_argument(
     "--disable_visual_insert",
     action="store_true",
@@ -195,7 +212,7 @@ def format_prompt(example):
 
 def process_func(example, idx):
     prompt, answer, image = format_prompt(example)
-    
+
     return {
         "idx": idx,  
         "question_raw": prompt,
@@ -204,7 +221,7 @@ def process_func(example, idx):
     }
 
 dataset = load_dataset("derek-thomas/ScienceQA")
-test_dataset = dataset["test"]
+test_dataset = dataset["validation"] if args.use_validation_set else dataset["test"]
 
 def has_image(example):
     return "image" in example and example["image"] is not None

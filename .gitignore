@@ -211,3 +211,5 @@ qwen_vl/output
 *.log
 
 qwen_vl/outputs_dynamic_ivtlr/
+qwen_vl/lvar_sqa_phase_1/
+qwen_vl/outputs_lvar/

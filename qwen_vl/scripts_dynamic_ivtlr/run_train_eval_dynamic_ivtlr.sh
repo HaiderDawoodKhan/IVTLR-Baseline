@@ -107,27 +107,27 @@ eval_sqa() {
 # run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "qwenvl_m3cot_dynamic_no_hidden_distill.log"
 # eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps" "args/qwen_m3cot_no_hidden_distill_8_steps.yaml" "latest_dynamic_no_hidden_distill_8_steps"
 
-create_curriculum_config \
-  "$BASE_M3COT_8_STEP_CONFIG" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
-  "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span" \
-  "true" \
-  "false"
-run_deepspeed \
-  "qwenvl_run_m3cot.py" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
-  "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_prefix_span.log"
-eval_m3cot \
-  "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
-  "latest_dynamic_no_hidden_distill_8_steps_prefix_span"
+# create_curriculum_config \
+#   "$BASE_M3COT_8_STEP_CONFIG" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
+#   "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span" \
+#   "true" \
+#   "false"
+# run_deepspeed \
+#   "qwenvl_run_m3cot.py" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
+#   "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_prefix_span.log"
+# eval_m3cot \
+#   "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span.yaml" \
+#   "latest_dynamic_no_hidden_distill_8_steps_prefix_span"
 
-create_curriculum_config \
-  "$BASE_M3COT_8_STEP_CONFIG" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
-  "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_fixed_mask" \
-  "false" \
-  "true"
+# create_curriculum_config \
+#   "$BASE_M3COT_8_STEP_CONFIG" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
+#   "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_fixed_mask" \
+#   "false" \
+#   "true"
 run_deepspeed \
   "qwenvl_run_m3cot.py" \
   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
@@ -137,20 +137,20 @@ eval_m3cot \
   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_fixed_mask.yaml" \
   "latest_dynamic_no_hidden_distill_8_steps_fixed_mask"
 
-create_curriculum_config \
-  "$BASE_M3COT_8_STEP_CONFIG" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
-  "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask" \
-  "true" \
-  "true"
-run_deepspeed \
-  "qwenvl_run_m3cot.py" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
-  "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_prefix_span_fixed_mask.log"
-eval_m3cot \
-  "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask" \
-  "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
-  "latest_dynamic_no_hidden_distill_8_steps_prefix_span_fixed_mask"
+# create_curriculum_config \
+#   "$BASE_M3COT_8_STEP_CONFIG" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
+#   "qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask" \
+#   "true" \
+#   "true"
+# run_deepspeed \
+#   "qwenvl_run_m3cot.py" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
+#   "qwenvl_m3cot_dynamic_no_hidden_distill_8_steps_prefix_span_fixed_mask.log"
+# eval_m3cot \
+#   "$OUTPUT_ROOT/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask" \
+#   "$GENERATED_CONFIG_DIR/qwen_m3cot_no_hidden_distill_8_steps_prefix_span_fixed_mask.yaml" \
+#   "latest_dynamic_no_hidden_distill_8_steps_prefix_span_fixed_mask"
 
 # run_deepspeed "qwenvl_run_m3cot.py" "args/qwen_m3cot.yaml" "qwenvl_m3cot_dynamic_hidden_distill.log"
 # eval_m3cot "$OUTPUT_ROOT/qwen_IVTLR_m3cot" "args/qwen_m3cot.yaml" "latest_dynamic_hidden_distill"

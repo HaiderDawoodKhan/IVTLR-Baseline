@@ -32,10 +32,26 @@ checkpoint=$(find_latest_checkpoint "$CHECKPOINT_DIR") || {
 
 echo "Using M3CoT checkpoint: $checkpoint"
 
-run_tag="dynamic_latent_steps"
+run_tag="dynamic_latent_steps_normal"
 python "infer_m3cot.py" \
   --config "$CONFIG_FILE" \
-  --checkpoint "$checkpoint" \
+  --checkpoint "/home/csalt/Haider/DVLM/IVT-LR/qwen_vl/outputs_dynamic_ivtlr/qwen_IVTLR_m3cot_no_hidden_distill_8_steps/epoch_20_full_model_fp32.pth" \
+  --run_tag "$run_tag" \
+  --output_root "$OUTPUT_ROOT" \
+  --dynamic_latent_steps
+
+run_tag="dynamic_latent_steps_prefix_span"
+python "infer_m3cot.py" \
+  --config "$CONFIG_FILE" \
+  --checkpoint "/home/csalt/Haider/DVLM/IVT-LR/qwen_vl/outputs_dynamic_ivtlr/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_prefix_span/epoch_20_full_model_fp32.pth" \
+  --run_tag "$run_tag" \
+  --output_root "$OUTPUT_ROOT" \
+  --dynamic_latent_steps
+
+run_tag="dynamic_latent_steps_fixed_mask"
+python "infer_m3cot.py" \
+  --config "$CONFIG_FILE" \
+  --checkpoint "/home/csalt/Haider/DVLM/IVT-LR/qwen_vl/outputs_dynamic_ivtlr/qwen_IVTLR_m3cot_no_hidden_distill_8_steps_fixed_mask/epoch_20_full_model_fp32.pth" \
   --run_tag "$run_tag" \
   --output_root "$OUTPUT_ROOT" \
   --dynamic_latent_steps

@@ -114,6 +114,11 @@ parser.add_argument(
     help="Use per-example latent steps derived from the CoT rationale (capped at 8)",
 )
 parser.add_argument(
+    "--use_validation_set",
+    action="store_true",
+    help="Use validation set for inference",
+)
+parser.add_argument(
     "--disable_visual_insert",
     action="store_true",
     help="Disable top-k visual token insertion during latent reasoning",
@@ -221,7 +226,7 @@ def process_func(example):
     }
 
 dataset = load_dataset("LightChen2333/M3CoT")
-val_dataset = dataset["test"]
+val_dataset = dataset["validation"] if args.use_validation_set else dataset["test"]
 val_dataset = val_dataset.filter(lambda e: e["image"] is not None).map(process_func)
 
 def evaluate_and_save(eval_dataset, model, processor):
