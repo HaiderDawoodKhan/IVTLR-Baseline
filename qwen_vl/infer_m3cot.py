@@ -114,6 +114,7 @@ parser.add_argument(
     help="Use per-example latent steps derived from the CoT rationale (capped at 8)",
 )
 parser.add_argument(
+    "--use-validation-set",
     "--use_validation_set",
     action="store_true",
     help="Use validation set for inference",

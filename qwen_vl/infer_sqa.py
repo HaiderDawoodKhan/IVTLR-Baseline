@@ -6,6 +6,7 @@ import deepspeed
 from peft import LoraConfig,get_peft_model
 from qwen_vl_utils import process_vision_info
 from datasets import load_dataset
+from dataset import group_steps_to_max, split_rationale_into_sentences
 import re
 import logging
 import json
@@ -113,6 +114,7 @@ parser.add_argument(
     help="Use per-example latent steps derived from the CoT rationale (capped at 8)",
 )
 parser.add_argument(
+    "--use-validation-set",
     "--use_validation_set",
     action="store_true",
     help="Use validation set for inference",
@@ -212,12 +214,28 @@ def format_prompt(example):
 
 def process_func(example, idx):
     prompt, answer, image = format_prompt(example)
+    lecture = example.get("lecture", "") or ""
+    solution = example.get("solution", "") or ""
+
+    if lecture and solution:
+        rationale = (lecture.strip() + " " + solution.strip()).strip()
+    elif lecture:
+        rationale = lecture.strip()
+    elif solution:
+        rationale = solution.strip()
+    else:
+        rationale = ""
+
+    steps = split_rationale_into_sentences(rationale)
+    steps = group_steps_to_max(steps, MAX_DYNAMIC_LATENT_STEPS)
+    latent_steps = len(steps)
 
     return {
         "idx": idx,  
         "question_raw": prompt,
         "image_raw": image,
         "gt_answer": answer,  
+        "latent_steps": latent_steps,
     }
 
 dataset = load_dataset("derek-thomas/ScienceQA")
@@ -254,8 +272,12 @@ def evaluate_and_save(eval_dataset, model, processor):
         }]
         
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        if not args.no_reasoning:
-            text = text + ("<|latent|>" * INFERENCE_LATENT_STEPS)
+        latent_steps = args.latent_steps
+        if args.dynamic_latent_steps:
+            latent_steps = int(ex.get("latent_steps", 0))
+        latent_steps = max(0, min(latent_steps, MAX_DYNAMIC_LATENT_STEPS))
+        if not args.no_reasoning and latent_steps > 0:
+            text = text + ("<|latent|>" * latent_steps)
         
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = processor(
